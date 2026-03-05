@@ -1,0 +1,23 @@
+# 비공개 폴더
+prev/
+CLAUDE.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ROS2 빌드 산출물
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# 데이터
+episodes/
+*.npz
+
+# 기타
+.DS_Store
+*.swp
