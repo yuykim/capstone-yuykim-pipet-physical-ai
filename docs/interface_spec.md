@@ -160,12 +160,14 @@ string message
 **역할**: Mand.ro Mark7 로봇손 드라이버. ros2_control 기반 자체 개발.
 ForwardCommandController로 개별 손가락 제어, GripPresetNode로 프리셋 서비스 제공.
 
+> **네임스페이스**: Mark7 드라이버는 `/mark7` 네임스페이스로 실행된다. Indy7의 `/joint_states`와 충돌 방지.
+
 #### 발행 토픽
 
 | 토픽 | 타입 | QoS | 설명 |
 |------|------|-----|------|
 | `/gripper/status` | pipet_hand_mark7_msgs/GripperStatus | RELIABLE, 20Hz | 손가락 6개 현재 상태 |
-| `/joint_states` | sensor_msgs/JointState | RELIABLE, 20Hz | 손가락 6개 관절 각도 (rad) |
+| `/mark7/joint_states` | sensor_msgs/JointState | RELIABLE, 20Hz | 손가락 6개 관절 각도 (rad) |
 
 **GripperStatus 메시지 정의 (자체 정의):**
 ```
@@ -175,18 +177,18 @@ FingerState[6] fingers   # 손가락 6개 상태 배열
 ```
 ```
 # FingerState
-float32 position    # 현재 위치 (position count, raw ÷ 4)
-float32 current     # 전류 (mA, raw ÷ 10)
+float32 position    # 현재 위치 (steps, Rx에서 직접 수신)
+float32 current     # 전류 (mA, Rx에서 직접 수신)
 float32 temperature # 온도 (°C)
 ```
 
-손가락 인덱스 순서: `[0]Thumb Flex, [1]Index, [2]Middle, [3]Ring, [4]Little, [5]Thumb Ab`
+손가락 인덱스 순서: `[0]Thumb, [1]Index, [2]Middle, [3]Ring, [4]Little, [5]Thumb Ab`
 
 #### 구독 토픽
 
 | 토픽 | 타입 | 설명 |
 |------|------|------|
-| `/forward_position_controller/commands` | std_msgs/Float64MultiArray | 손가락 6개 목표 관절 각도 (rad), 인덱스 순서 동일 |
+| `/mark7/forward_position_controller/commands` | std_msgs/Float64MultiArray | 손가락 6개 목표 관절 각도 (rad), 인덱스 순서 동일 |
 
 #### 제공 서비스
 
@@ -322,7 +324,7 @@ float32 temperature # 온도 (°C)
 
 | 토픽 | 타입 | 설명 |
 |------|------|------|
-| `/forward_position_controller/commands` | std_msgs/Float64MultiArray | 손가락 6개 목표 position count, 인덱스 순서 동일 |
+| `/mark7/forward_position_controller/commands` | std_msgs/Float64MultiArray | 손가락 6개 목표 position count, 인덱스 순서 동일 |
 
 #### 런치 파라미터
 

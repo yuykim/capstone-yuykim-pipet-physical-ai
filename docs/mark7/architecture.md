@@ -1,6 +1,6 @@
 # Mark7 모듈 설계 문서
 
-**최종 수정:** 2026-03-05
+**최종 수정:** 2026-03-06
 **참조:** [전체 시스템 설계](architecture.md)
 
 ---
@@ -35,31 +35,47 @@ PC (ROS2 Humble)
 - **통신 방식**: 2.4GHz RF 무선 통신
 - **인터페이스**: USB Serial 단일 포트 `/dev/ttyACM0` (Tx/Rx 공용, 115200 bps, 8-N-1)
 - **DoF 구성**: Thumb Flexion, Index, Middle, Ring, Little, Thumb Ab/Adduction
-- **현황**: Tx 정상 동작 확인 / Rx 수신 미확인 (동글 Arduino 코드 미확보, 보류)
+- **현황**: 통신 프로토콜 공식 문서 확보 (2026-03-05, Mand.ro)
 
 ---
 
 ## 3. 통신 프로토콜
 
-### PC → Hand (Tx, 15 bytes)
+### PC → Hand (Tx, 11 bytes)
 
-| 바이트 | 항목 | 값 |
-|--------|------|----|
-| B0-B1 | 헤더 | `0xAA 0x55` |
-| B2-B7 | 손가락 선택 (Thumb~Thumb Ab) | 0 or 1 |
-| B8-B9 | 속도 (RPM/10) | 300~3000 (0=무시) |
-| B10-B11 | 전류 한계 (mA) | 600~1200 (0=무시) |
-| B12-B13 | 목표 위치 | -50~400 (0=변경 없음) |
-| B14 | 방향 | 0:Idle, 1:Forward, 2:Reverse, 3:Reset |
+| 바이트 | 항목 | 값 / 계산식 |
+|--------|------|------------|
+| B0 | Hand 선택 | 0xFD=Left, 0xFE=Right, 0xFF=Both |
+| B1 | Finger 비트마스크 | 1=Thumb, 2=Index, 4=Middle, 8=Ring, 16=Little, 32=ThumbAbd |
+| B2 | Speed | 0=skip, 실제 RPM = Data × 200 (범위 30~150) |
+| B3 | Current Limit | 0=skip, 실제 mA = 600 + Data × 3 |
+| B4 | Thumb Flexion 목표 위치 | 0=skip, 실제 steps = -21 + Data × 2 |
+| B5 | Index Flexion 목표 위치 | 동일 |
+| B6 | Middle Flexion 목표 위치 | 동일 |
+| B7 | Ring Flexion 목표 위치 | 동일 |
+| B8 | Little Flexion 목표 위치 | 동일 |
+| B9 | Thumb Abduction 목표 위치 | 동일 |
+| B10 | Direction | 0=Idle, 1=Forward, 2=Reverse, 3=Reset |
 
-### Hand → PC (Rx, 19 bytes)
+헤더 및 XOR 체크섬 **없음**.
 
-손가락 6개 × (Position÷4, Current÷10 mA, Temperature°C) + XOR Checksum
+### Hand → PC (Rx, 가변 길이 텍스트)
+
+쉼표(`,`) 구분 plain text 문자열, 줄바꿈(`\n`) 종료.
+
+```
+L|R, pos,cur,temp, pos,cur,temp, pos,cur,temp, pos,cur,temp, pos,cur,temp, pos,cur,temp
+```
+
+필드 순서: `Hand(L/R)`, `[Thumb Flex] Position, Current, Temperature`, `[Index]`, `[Middle]`, `[Ring]`, `[Little]`, `[Thumb Abd]`
+
+예시: `R,139,1140,35, 171,1140,34, 203,1140,34, 235,1140,34, 267,1140,34, 299,1140,34`
 
 ### 주의사항
 
-- Position=0 은 "목표 위치 변경 없음"을 의미 (0으로 이동이 아님)
-- Hall effect 센서 슬립이 있으므로 사용 중 완전 개방 시 Reset(Direction=3) 권장
+- **Position=0 (B4~B9)** 은 "목표 위치 변경 없음"을 의미 (0으로 이동이 아님)
+- Direction=**Forward** 하나로 양방향 이동 가능 — 목표값이 현재보다 작으면 자동 역방향
+- Hall effect 센서 슬립 존재 → 완전 개방 시마다 **Reset(Direction=3)** 권장
 - RF 통신 특성상 신호 손실 가능 → 중요한 명령은 2~3회 반복 전송 권장
 
 ---
@@ -93,7 +109,7 @@ PC (ROS2 Humble)
 │  │   use_mock_hardware=false → 실제 Dongle 시리얼 통신   │    │
 │  │   use_mock_hardware=true  → 내부 시뮬레이션           │    │
 │  │   read()  : Rx → /gripper/status 퍼블리시            │    │
-│  │   write() : Tx → 15바이트 명령 패킷 전송             │    │
+│  │   write() : Tx → 11바이트 명령 패킷 전송             │    │
 │  └──────────────────────────────────────────────────────┘    │
 │  ┌──────────────────────────────────────────────────────┐    │
 │  │            Safety Monitor Node                        │    │
@@ -124,7 +140,7 @@ mark7/
 ├── pipet_hand_mark7_description/     # URDF, 메시, RViz 설정
 ├── pipet_hand_mark7_driver/          # 핵심 드라이버 패키지
 │   ├── Hardware Interface            # ros2_control 하드웨어 인터페이스
-│   ├── 통신 프로토콜 구현             # 15/19바이트 패킷 인코딩/디코딩
+│   ├── 통신 프로토콜 구현             # 11바이트 Tx / 텍스트 CSV Rx 파싱
 │   ├── GripPresetNode                # grasp/open/press 서비스 제공
 │   ├── 안전 모니터링 노드            # 온도/전류 감시
 │   └── 통합 런치 파일               # real/mock 모드 선택
@@ -165,8 +181,8 @@ ros2 launch pipet_hand_mark7_driver mark7.launch.py use_mock_hardware:=true use_
 
 | 단계 | 패키지 | 내용 | 상태 |
 |------|--------|------|------|
-| 1 | `pipet_hand_mark7_driver` | 통신 프로토콜 (Tx/Rx 패킷), Serial 레이어 | ✅ 완료 |
-| 2 | `pipet_hand_mark7_driver` | ros2_control Hardware Interface (real + mock) | ✅ 완료 |
+| 1 | `pipet_hand_mark7_driver` | 통신 프로토콜 (11바이트 Tx / 텍스트 CSV Rx), Serial 레이어 | 🔲 재구현 필요 (프로토콜 변경) |
+| 2 | `pipet_hand_mark7_driver` | ros2_control Hardware Interface (real + mock) | 🔲 재구현 필요 (프로토콜 변경) |
 | 3 | `pipet_hand_mark7_driver` | GripPresetNode (grasp/open/press 서비스) | 🔲 미착수 |
 | 4 | `pipet_hand_mark7_driver` | 캘리브레이션 (URDF rad ↔ position count 매핑) | 🔲 보류 (실측 필요) |
 | 5 | `pipet_hand_mark7_driver` | 안전 모니터링 노드 (온도/전류 감시) | 🔲 미착수 |
@@ -174,7 +190,7 @@ ros2 launch pipet_hand_mark7_driver mark7.launch.py use_mock_hardware:=true use_
 | 7 | `pipet_hand_mark7_teleop` | Keyboard Teleop 노드 | 🟡 구현 완료 (Thumb flex 이슈 미해결) |
 | 8 | `pipet_hand_mark7_gazebo` | Gazebo 시뮬 환경 구성, 마우스 조작 | 🔲 미착수 |
 | 9 | `pipet_hand_mark7_gazebo` | Mirror Bridge 노드 (Gazebo → 실제) | 🔲 미착수 |
-| - | - | 실제 하드웨어 Rx 통신 디버깅 | 🔴 보류 (동글 코드 미확보) |
+| - | - | 실제 하드웨어 통합 테스트 | 🔲 미착수 |
 
 ---
 
