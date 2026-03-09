@@ -1,0 +1,48 @@
+# 비공개 폴더
+prev/
+CLAUDE.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ROS2 빌드 산출물
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# 데이터
+episodes/
+*.npz
+
+# 기타
+.DS_Store
+*.swp
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dev-debug.log
+# Dependency directories
+node_modules/
+# Environment variables
+.env
+# Editor directories and files
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+# OS specific
+
+# Task files
+# tasks.json
+# tasks/ 
