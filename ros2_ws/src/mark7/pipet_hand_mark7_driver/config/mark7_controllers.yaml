@@ -1,6 +1,6 @@
 /mark7/controller_manager:
   ros__parameters:
-    update_rate: 20
+    update_rate: 1
 
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster

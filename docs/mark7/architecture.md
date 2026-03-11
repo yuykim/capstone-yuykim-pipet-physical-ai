@@ -36,6 +36,8 @@ PC (ROS2 Humble)
 - **인터페이스**: USB Serial 단일 포트 `/dev/ttyACM0` (Tx/Rx 공용, 115200 bps, 8-N-1)
 - **DoF 구성**: Thumb Flexion, Index, Middle, Ring, Little, Thumb Ab/Adduction
 - **현황**: 통신 프로토콜 공식 문서 확보 (2026-03-05, Mand.ro)
+- **Rx 주기**: ~0.5Hz (하드웨어 특성, 1.5~2초 간격으로 수신)
+- **Tx 제약**: 연속 전송 시 하드웨어 처리 불가 → 명령 변경 시 1회만 전송
 
 ---
 
@@ -108,8 +110,8 @@ L|R, pos,cur,temp, pos,cur,temp, pos,cur,temp, pos,cur,temp, pos,cur,temp, pos,c
 │  │            Hardware Interface (ros2_control)          │    │
 │  │   use_mock_hardware=false → 실제 Dongle 시리얼 통신   │    │
 │  │   use_mock_hardware=true  → 내부 시뮬레이션           │    │
-│  │   read()  : Rx → /gripper/status 퍼블리시            │    │
-│  │   write() : Tx → 11바이트 명령 패킷 전송             │    │
+│  │   read()  : Rx 수신 시에만 /gripper/status 퍼블리시 (~0.5Hz)│
+│  │   write() : command 변경 시에만 Tx 1회 전송          │    │
 │  └──────────────────────────────────────────────────────┘    │
 │  ┌──────────────────────────────────────────────────────┐    │
 │  │            Safety Monitor Node                        │    │
@@ -125,7 +127,7 @@ L|R, pos,cur,temp, pos,cur,temp, pos,cur,temp, pos,cur,temp, pos,cur,temp, pos,c
 
 | 종류 | 이름 | 타입 | 제공 주체 | 설명 |
 |------|------|------|-----------|------|
-| 토픽 (발행) | `/gripper/status` | (자체 정의) | Hardware Interface | 그리퍼 현재 상태, 20Hz |
+| 토픽 (발행) | `/gripper/status` | (자체 정의) | Hardware Interface | 그리퍼 현재 상태, Rx 수신 시에만 (~0.5Hz) |
 | 서비스 | `/gripper/grasp` | std_srvs/Trigger | GripPresetNode | 파이펫 잡기 |
 | 서비스 | `/gripper/open` | std_srvs/Trigger | GripPresetNode | 손 펴기 |
 | 서비스 | `/gripper/press` | std_srvs/Trigger | GripPresetNode | 파이펫 누르기 |
@@ -181,13 +183,13 @@ ros2 launch pipet_hand_mark7_driver mark7.launch.py use_mock_hardware:=true use_
 
 | 단계 | 패키지 | 내용 | 상태 |
 |------|--------|------|------|
-| 1 | `pipet_hand_mark7_driver` | 통신 프로토콜 (11바이트 Tx / 텍스트 CSV Rx), Serial 레이어 | 🔲 재구현 필요 (프로토콜 변경) |
-| 2 | `pipet_hand_mark7_driver` | ros2_control Hardware Interface (real + mock) | 🔲 재구현 필요 (프로토콜 변경) |
+| 1 | `pipet_hand_mark7_driver` | 통신 프로토콜 (11바이트 Tx / 텍스트 CSV Rx), Serial 레이어 | ✅ 완료 |
+| 2 | `pipet_hand_mark7_driver` | ros2_control Hardware Interface (real + mock) | ✅ 완료 |
 | 3 | `pipet_hand_mark7_driver` | GripPresetNode (grasp/open/press 서비스) | 🔲 미착수 |
 | 4 | `pipet_hand_mark7_driver` | 캘리브레이션 (URDF rad ↔ position count 매핑) | 🔲 보류 (실측 필요) |
 | 5 | `pipet_hand_mark7_driver` | 안전 모니터링 노드 (온도/전류 감시) | 🔲 미착수 |
 | 6 | `pipet_hand_mark7_driver` | 런치/컨트롤러 설정 | ✅ 완료 |
-| 7 | `pipet_hand_mark7_teleop` | Keyboard Teleop 노드 | 🟡 구현 완료 (Thumb flex 이슈 미해결) |
+| 7 | `pipet_hand_mark7_teleop` | Command Input 노드 (절대값 입력) | ✅ 완료 |
 | 8 | `pipet_hand_mark7_gazebo` | Gazebo 시뮬 환경 구성, 마우스 조작 | 🔲 미착수 |
 | 9 | `pipet_hand_mark7_gazebo` | Mirror Bridge 노드 (Gazebo → 실제) | 🔲 미착수 |
 | - | - | 실제 하드웨어 통합 테스트 | 🔲 미착수 |
