@@ -1,1 +1,1 @@
-* [ai architecture 관련 문서](/docs/ai/ai_architecture.md)
+[ai architecture 관련 문서](/docs/ai/ai_architecture.md)
