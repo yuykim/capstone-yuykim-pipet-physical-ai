@@ -1,6 +1,6 @@
 # ROS2 인터페이스 명세
 
-**최종 수정:** 2026-03-05
+**최종 수정:** 2026-03-06
 **참조:** [전체 시스템 설계](architecture.md)
 
 ---
@@ -166,8 +166,8 @@ ForwardCommandController로 개별 손가락 제어, GripPresetNode로 프리셋
 
 | 토픽 | 타입 | QoS | 설명 |
 |------|------|-----|------|
-| `/gripper/status` | pipet_hand_mark7_msgs/GripperStatus | RELIABLE, 20Hz | 손가락 6개 현재 상태 |
-| `/mark7/joint_states` | sensor_msgs/JointState | RELIABLE, 20Hz | 손가락 6개 관절 각도 (rad) |
+| `/gripper/status` | pipet_hand_mark7_msgs/GripperStatus | RELIABLE | 손가락 6개 현재 상태. Rx 수신 시에만 발행 (~0.5Hz) |
+| `/mark7/joint_states` | sensor_msgs/JointState | RELIABLE | 손가락 6개 관절 위치 (steps). Rx 수신 시에만 발행 (~0.5Hz) |
 
 **GripperStatus 메시지 정의 (자체 정의):**
 ```
@@ -188,7 +188,7 @@ float32 temperature # 온도 (°C)
 
 | 토픽 | 타입 | 설명 |
 |------|------|------|
-| `/mark7/forward_position_controller/commands` | std_msgs/Float64MultiArray | 손가락 6개 목표 관절 각도 (rad), 인덱스 순서 동일 |
+| `/mark7/forward_position_controller/commands` | std_msgs/Float64MultiArray | 손가락 6개 목표 위치 (steps). 명령 변경 시 Tx 패킷 1회 전송. 연속 전송 시 하드웨어 처리 불가. |
 
 #### 제공 서비스
 
@@ -318,19 +318,18 @@ float32 temperature # 온도 (°C)
 
 ### 2.7 Mark7 단독 텔레오프 (`pipet_hand_mark7_teleop`)
 
-**역할**: Mark7 단독 테스트용. 키보드로 손가락 6개를 개별 제어.
+**역할**: Mark7 단독 테스트용. 공백 구분 6개 숫자를 입력받아 절대 위치 명령 전송.
+
+**입력 방식**: `100 100 100 100 0 0` 형태로 Enter 입력 → 1회 전송
+
+조인트 순서: `[0]Thumb Flex [1]Index [2]Middle [3]Ring [4]Pinky [5]Thumb Ab`
+범위: Thumb Flex 0~187, 나머지 0~300 (steps)
 
 #### 발행 토픽
 
 | 토픽 | 타입 | 설명 |
 |------|------|------|
-| `/mark7/forward_position_controller/commands` | std_msgs/Float64MultiArray | 손가락 6개 목표 position count, 인덱스 순서 동일 |
-
-#### 런치 파라미터
-
-| 파라미터 | 타입 | 기본값 | 설명 |
-|----------|------|--------|------|
-| `step` | float | `10.0` | 키 1회 입력 시 position count 변화량 |
+| `/mark7/forward_position_controller/commands` | std_msgs/Float64MultiArray | 손가락 6개 목표 위치 (steps). Enter 입력 시 1회 발행. |
 
 ---
 
