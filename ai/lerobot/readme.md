@@ -1,0 +1,1 @@
+* [LeRobotDataset v3.0 관련 문서](/docs/ai/lerobot_architecture)
