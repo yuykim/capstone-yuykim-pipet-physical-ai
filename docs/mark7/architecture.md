@@ -89,23 +89,21 @@ L|R, pos,cur,temp, pos,cur,temp, pos,cur,temp, pos,cur,temp, pos,cur,temp, pos,c
 │              외부 인터페이스 (오케스트레이터/테스트 도구)          │
 │                                                              │
 │  pipet_system_teleop        pipet_hand_mark7_teleop          │
-│  (통합 운용 - 서비스 호출)   (단독 테스트 - 직접 관절 제어)        │
-│                                                              │
+│  (통합 운용 - 서비스 호출)   ├ Command Input (단독 테스트)        │
+│                             └ GripPresetNode (프리셋 서비스)     │
 │  pipet_hand_mark7_gazebo                                     │
 │  (Gazebo 시뮬 → 실제 미러링)                                   │
 └──────┬───────────────────────────────┬───────────────────────┘
        │ /gripper/grasp|open|press     │ /forward_position_controller/commands
-       │ (서비스)                       │ (토픽, Float64MultiArray)
+       │ (서비스→GripPresetNode→토픽)   │ (토픽, Float64MultiArray)
 ┌──────▼───────────────────────────────▼───────────────────────┐
 │                  pipet_hand_mark7_driver                      │
 │                                                              │
-│  ┌─────────────────────────┐  ┌──────────────────────────┐   │
-│  │     GripPresetNode      │  │  ForwardCommandController │   │
-│  │  grasp / open / press   │  │  (ros2_control 기성 컨트롤러)│  │
-│  │  서비스 → 관절 포즈 변환  │  │  관절 각도 직접 명령 수신   │  │
-│  └────────────┬────────────┘  └────────────┬─────────────┘   │
-│               │ /forward_position_controller/commands         │
-│               └────────────────┬────────────┘                │
+│  ┌──────────────────────────────────────────────────────┐    │
+│  │  ForwardCommandController (ros2_control 기성 컨트롤러)  │    │
+│  │  관절 각도 직접 명령 수신                               │    │
+│  └────────────────────────┬───────────────────────────┘    │
+│                           │                                │
 │  ┌─────────────────────────────▼────────────────────────┐    │
 │  │            Hardware Interface (ros2_control)          │    │
 │  │   use_mock_hardware=false → 실제 Dongle 시리얼 통신   │    │
@@ -128,9 +126,9 @@ L|R, pos,cur,temp, pos,cur,temp, pos,cur,temp, pos,cur,temp, pos,cur,temp, pos,c
 | 종류 | 이름 | 타입 | 제공 주체 | 설명 |
 |------|------|------|-----------|------|
 | 토픽 (발행) | `/gripper/status` | (자체 정의) | Hardware Interface | 그리퍼 현재 상태, Rx 수신 시에만 (~0.5Hz) |
-| 서비스 | `/gripper/grasp` | std_srvs/Trigger | GripPresetNode | 파이펫 잡기 |
-| 서비스 | `/gripper/open` | std_srvs/Trigger | GripPresetNode | 손 펴기 |
-| 서비스 | `/gripper/press` | std_srvs/Trigger | GripPresetNode | 파이펫 누르기 |
+| 서비스 | `/gripper/grasp` | std_srvs/Trigger | GripPresetNode (teleop 패키지) | 피펫 잡기 |
+| 서비스 | `/gripper/open` | std_srvs/Trigger | GripPresetNode (teleop 패키지) | 손 펴기 |
+| 서비스 | `/gripper/press` | std_srvs/Trigger | GripPresetNode (teleop 패키지) | 피펫 누르기 |
 | 토픽 (구독) | `/forward_position_controller/commands` | std_msgs/Float64MultiArray | ForwardCommandController | 관절 각도 직접 명령 |
 
 ---
@@ -146,9 +144,11 @@ mark7/
 │   ├── GripPresetNode                # grasp/open/press 서비스 제공
 │   ├── 안전 모니터링 노드            # 온도/전류 감시
 │   └── 통합 런치 파일               # real/mock 모드 선택
-├── pipet_hand_mark7_teleop/          # Mark7 단독 테스트용
-│   └── Keyboard Teleop 노드          # 개별 손가락 키보드 제어
-│                                     # → /forward_position_controller/commands 직접 발행
+├── pipet_hand_mark7_teleop/          # Mark7 단독 테스트 + 프리셋 서비스
+│   ├── Keyboard Teleop 노드          # 개별 손가락 키보드 제어
+│   │                                 # → /forward_position_controller/commands 직접 발행
+│   └── GripPresetNode                # grasp/open/press 서비스 제공
+│                                     # → /forward_position_controller/commands 프리셋 발행
 └── pipet_hand_mark7_gazebo/          # Gazebo 시뮬레이션
     ├── Gazebo 환경 설정
     └── Mirror Bridge 노드            # Gazebo joint_states → 실제 로봇
@@ -185,7 +185,7 @@ ros2 launch pipet_hand_mark7_driver mark7.launch.py use_mock_hardware:=true use_
 |------|--------|------|------|
 | 1 | `pipet_hand_mark7_driver` | 통신 프로토콜 (11바이트 Tx / 텍스트 CSV Rx), Serial 레이어 | ✅ 완료 |
 | 2 | `pipet_hand_mark7_driver` | ros2_control Hardware Interface (real + mock) | ✅ 완료 |
-| 3 | `pipet_hand_mark7_driver` | GripPresetNode (grasp/open/press 서비스) | 🔲 미착수 |
+| 3 | `pipet_hand_mark7_teleop` | GripPresetNode (grasp/open/press 서비스) | ✅ 완료 |
 | 4 | `pipet_hand_mark7_driver` | 캘리브레이션 (URDF rad ↔ position count 매핑) | 🔲 보류 (실측 필요) |
 | 5 | `pipet_hand_mark7_driver` | 안전 모니터링 노드 (온도/전류 감시) | 🔲 미착수 |
 | 6 | `pipet_hand_mark7_driver` | 런치/컨트롤러 설정 | ✅ 완료 |
@@ -193,6 +193,16 @@ ros2 launch pipet_hand_mark7_driver mark7.launch.py use_mock_hardware:=true use_
 | 8 | `pipet_hand_mark7_gazebo` | Gazebo 시뮬 환경 구성, 마우스 조작 | 🔲 미착수 |
 | 9 | `pipet_hand_mark7_gazebo` | Mirror Bridge 노드 (Gazebo → 실제) | 🔲 미착수 |
 | - | - | 실제 하드웨어 통합 테스트 | 🔲 미착수 |
+
+### 그립 프리셋 값
+
+| 프리셋 | Thumb | Index | Middle | Ring | Pinky | ThumbAb | 용도 |
+|--------|-------|-------|--------|------|-------|---------|------|
+| grasp | 0 | 0 | 350 | 350 | 350 | 0 | 피펫 잡기 (중지~소지 닫힘) |
+| open | 0 | 0 | 0 | 0 | 0 | 0 | 손 펴기 (전체 개방) |
+| press | 150 | 0 | 0 | 0 | 0 | 0 | 피펫 버튼 누르기 (엄지만) |
+
+설정 파일: `pipet_hand_mark7_driver/config/grip_presets.yaml`
 
 ---
 

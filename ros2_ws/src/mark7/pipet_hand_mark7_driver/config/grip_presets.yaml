@@ -1,9 +1,9 @@
-# Mark7 그립 프리셋 관절 각도 (rad)
-# 캘리브레이션 전 임시값 - Phase 3 실측 후 업데이트 필요
-# 순서: [thumb_flex, index, middle, ring, little, thumb_ab]
+# Mark7 그립 프리셋 관절값
+# 순서: [Thumb, Index, Middle, Ring, Pinky, ThumbAb]
+# 범위: Thumb 0~187, 나머지 0~300 (350은 하드웨어 허용 범위)
 
 grip_preset_node:
   ros__parameters:
-    grasp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # TODO: 캘리브레이션 후 업데이트
-    open:  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # TODO: 캘리브레이션 후 업데이트
-    press: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # TODO: 캘리브레이션 후 업데이트
+    grasp: [0.0, 0.0, 350.0, 350.0, 350.0, 0.0]
+    open:  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    press: [150.0, 0.0, 0.0, 0.0, 0.0, 0.0]

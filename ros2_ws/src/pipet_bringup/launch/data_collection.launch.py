@@ -104,7 +104,22 @@ def generate_launch_description():
         }],
     )
 
-    # -- 4. Data Collector --
+    # -- 4. Grip Preset Node (provides /gripper/grasp, open, press services) --
+
+    grip_preset_node = Node(
+        package='pipet_hand_mark7_teleop',
+        executable='grip_preset_node',
+        name='grip_preset_node',
+        output='screen',
+        parameters=[
+            PathJoinSubstitution([
+                FindPackageShare('pipet_hand_mark7_driver'),
+                'config', 'grip_presets.yaml',
+            ])
+        ],
+    )
+
+    # -- 5. Data Collector --
 
     data_collector_node = Node(
         package='pipet_data_collector',
@@ -127,6 +142,7 @@ def generate_launch_description():
         camera_fps_arg,
         indy_driver_launch,
         mark7_driver_launch,
+        grip_preset_node,
         realsense_node,
         data_collector_node,
     ])
