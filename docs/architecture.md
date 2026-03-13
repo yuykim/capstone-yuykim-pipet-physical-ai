@@ -182,6 +182,7 @@ move_to_joint() + /gripper/grasp|open|press() 호출
 #### AI 학습 방법 (3가지 병행 시도)
 1. **Isaac Lab + Robomimic** — BC 모방학습 후 PPO 강화학습, GPU 병렬 시뮬레이션
 2. **Hugging Face LeRobot** — ACT, Diffusion Policy 등 최신 알고리즘, 실제 로봇 배포 초점
+* [LeRobotDataset v3.0 관련 문서](./ai/ai_architecture.md)
 3. **Unity ML-Agents** — GAIL(적대적 모방학습) + PPO
 
 #### 에피소드
