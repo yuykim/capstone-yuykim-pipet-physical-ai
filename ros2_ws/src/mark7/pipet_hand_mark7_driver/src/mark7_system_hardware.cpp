@@ -30,6 +30,7 @@ hardware_interface::CallbackReturn Mark7SystemHardware::on_init(
 
   // 벡터 초기화
   hw_commands_.assign(n, 0.0);
+  hw_commands_sent_.assign(n, -1.0);  // -1: 아직 전송 안 함
   hw_states_position_.assign(n, 0.0);
   hw_states_current_.assign(n, 0.0);
   hw_states_temperature_.assign(n, 0.0);
@@ -135,7 +136,7 @@ hardware_interface::return_type Mark7SystemHardware::read(
     return hardware_interface::return_type::OK;
   }
 
-  const std::string raw_line = serial_.read_crlf_line(20);
+  const std::string raw_line = serial_.read_crlf_line(100);
   if (raw_line.empty()) {
     // 타임아웃: 이전 상태 유지
     return hardware_interface::return_type::OK;
@@ -171,13 +172,11 @@ hardware_interface::return_type Mark7SystemHardware::read(
 
   RCLCPP_INFO(
     rclcpp::get_logger("Mark7SystemHardware"),
-    "Rx parsed pos=[%d,%d,%d,%d,%d,%d] cur=[%d,%d,%d,%d,%d,%d] temp=[%d,%d,%d,%d,%d,%d]",
+    "Rx: target=[%.0f,%.0f,%.0f,%.0f,%.0f,%.0f] pos=[%d,%d,%d,%d,%d,%d]",
+    hw_commands_[0], hw_commands_[1], hw_commands_[2],
+    hw_commands_[3], hw_commands_[4], hw_commands_[5],
     pkt.fingers[0].position, pkt.fingers[1].position, pkt.fingers[2].position,
-    pkt.fingers[3].position, pkt.fingers[4].position, pkt.fingers[5].position,
-    pkt.fingers[0].current, pkt.fingers[1].current, pkt.fingers[2].current,
-    pkt.fingers[3].current, pkt.fingers[4].current, pkt.fingers[5].current,
-    pkt.fingers[0].temperature, pkt.fingers[1].temperature, pkt.fingers[2].temperature,
-    pkt.fingers[3].temperature, pkt.fingers[4].temperature, pkt.fingers[5].temperature);
+    pkt.fingers[3].position, pkt.fingers[4].position, pkt.fingers[5].position);
 
   return hardware_interface::return_type::OK;
 }
@@ -194,23 +193,16 @@ hardware_interface::return_type Mark7SystemHardware::write(
     return hardware_interface::return_type::OK;
   }
 
-  // state와 command 오차 체크: 모든 관절이 threshold 이내면 전송 생략
-  bool needs_send = false;
-  for (std::size_t i = 0; i < hw_commands_.size() && i < 6; ++i) {
-    if (std::abs(hw_commands_[i] - hw_states_position_[i]) > POSITION_ERROR_THRESHOLD) {
-      needs_send = true;
-      break;
-    }
-  }
-  if (!needs_send) {
+  // command가 변경된 경우에만 전송
+  if (hw_commands_ == hw_commands_sent_) {
     return hardware_interface::return_type::OK;
   }
+  hw_commands_sent_ = hw_commands_;
 
-  // 오차 초과 관절이 있으면 전체 패킷 전송 (2회, RF 손실 대비)
   Mark7TxPacket pkt;
   pkt.finger_mask = 0x3F;   // 전체 6개 손가락
   pkt.speed       = 50;     // 실제 RPM = 50×200 = 10000 RPM
-  pkt.current     = 67;     // 실제 mA = 600+67×3 = 801 mA
+  pkt.current     = 250;    // 실제 mA = 600+250×3 = 1350 mA
   pkt.direction   = Direction::FORWARD;
   for (std::size_t i = 0; i < hw_commands_.size() && i < 6; ++i) {
     pkt.position[i] = Mark7TxPacket::steps_to_raw(
@@ -223,11 +215,9 @@ hardware_interface::return_type Mark7SystemHardware::write(
 
   RCLCPP_INFO(
     rclcpp::get_logger("Mark7SystemHardware"),
-    "Tx send: cmd=[%.0f,%.0f,%.0f,%.0f,%.0f,%.0f] state=[%.0f,%.0f,%.0f,%.0f,%.0f,%.0f]",
+    "Tx: [%.0f,%.0f,%.0f,%.0f,%.0f,%.0f]",
     hw_commands_[0], hw_commands_[1], hw_commands_[2],
-    hw_commands_[3], hw_commands_[4], hw_commands_[5],
-    hw_states_position_[0], hw_states_position_[1], hw_states_position_[2],
-    hw_states_position_[3], hw_states_position_[4], hw_states_position_[5]);
+    hw_commands_[3], hw_commands_[4], hw_commands_[5]);
 
   return hardware_interface::return_type::OK;
 }

@@ -58,6 +58,7 @@ private:
   SerialPort serial_;
 
   std::vector<double> hw_commands_;           ///< position commands [num_joints]
+  std::vector<double> hw_commands_sent_;      ///< 마지막으로 전송한 commands (변경 감지용)
   std::vector<double> hw_states_position_;    ///< [num_joints]
   std::vector<double> hw_states_current_;     ///< [num_joints]
   std::vector<double> hw_states_temperature_; ///< [num_joints]
