@@ -30,6 +30,7 @@ observation_t → action_t
 데이터는 각 시점의 **관측값(observation)** 과 **행동값(action)** 으로 나누어 수집한다.
 수집된 데이터는 이후 전처리 및 변환을 거쳐 다양한 형식으로 활용되며, 여러 플랫폼에서 학습을 수행하는 데 사용한다.
 *LeRobot 기반 학습을 수행하는 경우에는 Hugging Face에서 제공하는 **LeRobotDataset v3.0** 형식으로 변환한다.*
+* [LeRobotDataset v3.0 관련 문서](./lerobot_architecture.md)
 
 ### Raw Observation (입력 데이터)
 
