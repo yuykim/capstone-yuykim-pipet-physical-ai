@@ -63,7 +63,7 @@ class DataCollectorNode(Node):
         self._clear_buffers()
 
         # Gripper action tracking
-        # 0=hold, 1=grasp, 2=open, 3=press
+        # 0=hold, 1=grasp, 2=open, 3=press, 4=release
         self._current_gripper_action: int = 0
 
         # Services
@@ -90,6 +90,9 @@ class DataCollectorNode(Node):
         )
         self.gripper_action_srv_press = self.create_service(
             Trigger, '/data_collector/log_press', self._log_press_callback
+        )
+        self.gripper_action_srv_release = self.create_service(
+            Trigger, '/data_collector/log_release', self._log_release_callback
         )
 
         # Synchronized subscribers
@@ -188,6 +191,12 @@ class DataCollectorNode(Node):
         self._current_gripper_action = 3
         response.success = True
         response.message = 'Gripper action set to PRESS'
+        return response
+
+    def _log_release_callback(self, request, response):
+        self._current_gripper_action = 4
+        response.success = True
+        response.message = 'Gripper action set to RELEASE'
         return response
 
     # -- Synchronized callback --

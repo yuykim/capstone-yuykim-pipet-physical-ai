@@ -2,8 +2,8 @@
 """
 Indy7 Only Launch - Direct teaching without Mark7 or camera.
 
-Starts Indy7 driver only. Use the existing indy7_gripper_teleop for control:
-  ros2 run indy7_gripper_teleop teaching_control.py
+Starts Indy7 driver only. Use system_teleop for control:
+  ros2 run pipet_system_teleop system_teleop_node
 """
 
 from launch import LaunchDescription
@@ -15,7 +15,7 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     indy_ip_arg = DeclareLaunchArgument(
-        'indy_ip', default_value='192.168.1.100',
+        'indy_ip', default_value='192.168.1.10',
         description='Indy7 robot IP address',
     )
     indy_type_arg = DeclareLaunchArgument(

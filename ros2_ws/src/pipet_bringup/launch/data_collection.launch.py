@@ -28,7 +28,7 @@ def generate_launch_description():
 
     indy_ip_arg = DeclareLaunchArgument(
         'indy_ip',
-        default_value='192.168.1.100',
+        default_value='192.168.1.10',
         description='Indy7 robot IP address',
     )
     indy_type_arg = DeclareLaunchArgument(

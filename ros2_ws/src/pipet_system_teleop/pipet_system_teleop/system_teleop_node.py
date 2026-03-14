@@ -66,6 +66,7 @@ class SystemTeleopNode(Node):
         G      - Mark7 grasp
         O      - Mark7 open
         P      - Mark7 press (pipette)
+        R      - Mark7 release (thumb open)
         E      - Error recovery + resume teaching
         S      - Show status
         Q      - Quit
@@ -81,6 +82,7 @@ class SystemTeleopNode(Node):
         self.gripper_grasp = self.create_client(Trigger, '/gripper/grasp')
         self.gripper_open = self.create_client(Trigger, '/gripper/open')
         self.gripper_press = self.create_client(Trigger, '/gripper/press')
+        self.gripper_release = self.create_client(Trigger, '/gripper/release')
 
         # Service clients -- Data collector
         self.data_start = self.create_client(Trigger, '/data_collector/start')
@@ -90,6 +92,7 @@ class SystemTeleopNode(Node):
         self.log_grasp = self.create_client(Trigger, '/data_collector/log_grasp')
         self.log_open = self.create_client(Trigger, '/data_collector/log_open')
         self.log_press = self.create_client(Trigger, '/data_collector/log_press')
+        self.log_release = self.create_client(Trigger, '/data_collector/log_release')
 
         # Subscriber -- recording status
         self._is_recording = False
@@ -149,6 +152,7 @@ class SystemTeleopNode(Node):
         print('    [G]  Grasp (pipette)')
         print('    [O]  Open (release)')
         print('    [P]  Press (pipette button)')
+        print('    [R]  Release (thumb open)')
         print('\n  Other:')
         print('    [S]  Show status')
         print('    [Q]  Quit')
@@ -246,6 +250,11 @@ class SystemTeleopNode(Node):
         self._call_trigger(self.gripper_press)
         self._call_trigger(self.log_press)
 
+    def _handle_release(self):
+        print('Gripper: RELEASE (thumb open)')
+        self._call_trigger(self.gripper_release)
+        self._call_trigger(self.log_release)
+
     def _handle_error_recovery(self):
         if self._is_recording:
             print('\nStopping recording before recovery...')
@@ -316,6 +325,8 @@ class SystemTeleopNode(Node):
                     self._handle_open()
                 elif key == 'P':
                     self._handle_press()
+                elif key == 'R':
+                    self._handle_release()
                 elif key == 'E':
                     self._handle_error_recovery()
                 elif key == 'S':

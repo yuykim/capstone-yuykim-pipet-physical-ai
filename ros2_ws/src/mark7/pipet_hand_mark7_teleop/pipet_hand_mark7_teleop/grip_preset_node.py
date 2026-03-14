@@ -22,6 +22,7 @@ class GripPresetNode(Node):
         self.declare_parameter('grasp', [0.0, 0.0, 350.0, 350.0, 350.0, 0.0])
         self.declare_parameter('open', [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.declare_parameter('press', [150.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        self.declare_parameter('release', [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
         # Publisher to forward_position_controller
         self.cmd_pub = self.create_publisher(
@@ -34,6 +35,7 @@ class GripPresetNode(Node):
         self.create_service(Trigger, '/gripper/grasp', self._grasp_cb)
         self.create_service(Trigger, '/gripper/open', self._open_cb)
         self.create_service(Trigger, '/gripper/press', self._press_cb)
+        self.create_service(Trigger, '/gripper/release', self._release_cb)
 
         self.get_logger().info('Grip preset node ready')
 
@@ -57,6 +59,11 @@ class GripPresetNode(Node):
 
     def _press_cb(self, request, response):
         response.message = self._publish_preset('press')
+        response.success = True
+        return response
+
+    def _release_cb(self, request, response):
+        response.message = self._publish_preset('release')
         response.success = True
         return response
 
