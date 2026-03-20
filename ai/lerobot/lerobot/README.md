@@ -1,5 +1,12 @@
+## 참고 사항
+
+- **설치 날짜**: 2026.03.20
+- **LeRobot 버전**: 0.5.1
+- 현재 LeRobot 소스는 프로젝트 내부에 직접 포함되어 있어 자동 업데이트되지 않습니다.
+- 향후 상위 버전의 LeRobot을 반영할 경우, 수동으로 변경 사항을 확인하고 필요한 수정 작업을 진행해야 합니다.
+
 <p align="center">
-  <img alt="LeRobot, Hugging Face Robotics Library" src="./media/readme/lerobot-logo-thumbnail.png" width="100%">
+  <img alt="LeRobot, Hugging Face Robotics Library" src="./media/readme/lerobot-logo-thumbnail.png" width="80%">
 </p>
 
 <div align="center">

@@ -2,6 +2,12 @@
 > [LeRobot 설치 방법](https://huggingface.co/docs/lerobot/en/installation)
 > [LeRobotDataset v3.0 관련 문서](/docs/ai/lerobot_architecture.md)
 
+###  참고사항
+- **설치 날짜**: 2026.03.20
+- **LeRobot 버전**: 0.5.1
+- 현재 LeRobot 소스는 프로젝트 내부에 직접 포함되어 있어 자동 업데이트되지 않습니다.
+- 향후 상위 버전의 LeRobot을 반영할 경우, 수동으로 변경 사항을 확인하고 필요한 수정 작업을 진행해야 합니다.
+
 ## LeRobot 설치
 
 ### Linux / WSL 환경을 사용한 이유
