@@ -15,6 +15,7 @@ setup(
     entry_points={
         'console_scripts': [
             'teleop_keyboard = pipet_hand_mark7_teleop.teleop_keyboard:main',
+            'grip_preset_node = pipet_hand_mark7_teleop.grip_preset_node:main',
         ],
     },
 )

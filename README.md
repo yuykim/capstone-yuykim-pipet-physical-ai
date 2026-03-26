@@ -1,42 +1,139 @@
 # Pipet Physical AI
 
-Indy7 로봇팔과 Mand.ro Mark7 로봇손을 이용해 파이펫(pipette)을 조작하는 Physical AI 프로젝트.
+Indy7 로봇팔 + Mand.ro Mark7 로봇손 + RealSense D435 카메라 2대를 이용한 Physical AI 피펫 조작 프로젝트.
+직접 교시로 데이터 수집 → AI 학습 → 자율 동작 배포.
 
 ## 시스템 구성
 
 | 항목 | 내용 |
 |------|------|
-| 로봇팔 | Neuromeka Indy7 |
-| 로봇손 | Mand.ro Mark7 |
-| 카메라 | Intel RealSense D435 |
+| 로봇팔 | Neuromeka Indy7 (이더넷, 192.168.1.10) |
+| 로봇손 | Mand.ro Mark7 (USB Serial, /dev/ttyACM0) |
+| 카메라 (손목) | Intel RealSense D435 (S/N: 844212071939) |
+| 카메라 (오버헤드) | Intel RealSense D435 (S/N: 317222074298) |
 | OS / ROS | Ubuntu 22.04 / ROS2 Humble |
+| DDS | Cyclone DDS |
 
 ---
 
 ## 빠른 시작
 
-### 1. 워크스페이스 빌드
+### 0. 네트워크 설정 (최초 1회)
+
+Indy7은 USB 이더넷 어댑터(`enx00e04c360046`)를 통해 연결된다. PC에 고정 IP를 설정해야 로봇과 통신할 수 있다.
 
 ```bash
-cd ros2_ws
+# 영구 고정 IP 설정 (재부팅 후에도 유지)
+sudo nmcli con mod enx00e04c360046 ipv4.addresses 192.168.1.100/24 ipv4.method manual
+sudo nmcli con up enx00e04c360046
+
+# 확인
+ip addr show enx00e04c360046 | grep inet
+# → inet 192.168.1.100/24 가 보여야 함
+
+# 로봇 연결 테스트
+ping 192.168.1.10
+```
+
+> **트러블슈팅:** `ping 192.168.1.10` 실패 시 → ① 로봇 컨트롤러 전원 확인 ② 이더넷 케이블 확인 ③ `ip addr show enx00e04c360046`에서 IP 할당 확인.
+> gRPC 포트 연결 실패(`nc -zv 192.168.1.10 20001`) → 로봇 컨트롤러 재부팅 후 2~3분 대기.
+
+### 1. 의존성 설치
+
+```bash
+# ROS2 패키지
+sudo apt install ros-humble-rmw-cyclonedds-cpp ros-humble-moveit \
+  ros-humble-ros2-control ros-humble-ros2-controllers \
+  ros-humble-gazebo-ros ros-humble-gazebo-ros2-control \
+  ros-humble-rosidl-default-generators \
+  ros-humble-cv-bridge ros-humble-image-transport \
+  ros-humble-realsense2-camera
+
+# Python
+pip3 install neuromeka numpy opencv-python
+
+# 서브모듈 초기화 (최초 1회)
+cd /home/sirlab/Dev/ROS2/pipet-physical-ai
+git submodule update --init --recursive
+```
+
+### 2. 빌드
+
+```bash
+cd /home/sirlab/Dev/ROS2/pipet-physical-ai
+source /opt/ros/humble/setup.bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 colcon build
 source install/setup.bash
 ```
 
-### 2. Mark7 단독 실행 (하드웨어 연결 시)
+### 3. 데이터 수집 (전체 시스템)
+
+> **사전 조건:** `ping 192.168.1.10` 성공 확인
 
 ```bash
-# 시리얼 포트 권한 부여 (최초 1회)
-sudo chmod 777 /dev/ttyACM0
+# 터미널 1: 백엔드 서비스 (Indy7 + Mark7 + RealSense 2대 + DataCollector)
+cd ~/Dev/ROS2/pipet-physical-ai
+source /opt/ros/humble/setup.bash && source install/setup.bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ros2 launch pipet_bringup data_collection.launch.py indy_ip:=192.168.1.10
 
-# 드라이버 런치
-ros2 launch pipet_hand_mark7_driver mark7_hardware.launch.py port:=/dev/ttyACM0
-
-# 별도 터미널: 명령 입력
-ros2 run pipet_hand_mark7_teleop teleop_keyboard
+# 터미널 2: 키보드 텔레옵
+cd ~/Dev/ROS2/pipet-physical-ai
+source /opt/ros/humble/setup.bash && source install/setup.bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ros2 run pipet_system_teleop system_teleop_node
 ```
 
-### 3. Mark7 가상 모드 (하드웨어 없이)
+**텔레옵 키 매핑 (D/d 외 대소문자 무관):**
+
+| 키 | 동작 |
+|----|------|
+| SPACE | 녹화 시작/중지 (중지 시 Y/N으로 성공/실패 라벨링) |
+| H | Indy7 홈 포지션 |
+| D / d | 직접 교시 ON / OFF |
+| G | Mark7 잡기 (Grasp) |
+| O | Mark7 펴기 (Open) |
+| P | Mark7 누르기 (Press) — 잡은 상태 유지하며 엄지만 누름 |
+| R | Mark7 엄지 펴기 (Release) — 잡은 상태 유지하며 엄지만 펴기 |
+| E | 에러 복구 + 교시 재개 |
+| S | 상태 표시 |
+| Q | 종료 |
+
+**녹화 워크플로우:**
+1. `D`로 직접 교시 ON
+2. `SPACE`로 녹화 시작
+3. 로봇 팔을 움직이며 G/O/P/R로 그리퍼 조작
+4. `SPACE`로 녹화 중지 → `Y`(성공) 또는 `N`(실패) 입력
+5. NPZ 저장 완료 후 경로 표시 (대용량이므로 저장에 시간이 걸릴 수 있음)
+
+**데이터 수집 성능:** ~20Hz, 640x480 원본 해상도, 에피소드당 ~1GB/분
+
+---
+
+## 단독 테스트
+
+### Indy7 단독
+
+```bash
+# 터미널 1
+ros2 launch pipet_bringup indy7_only.launch.py indy_ip:=192.168.1.10
+
+# 터미널 2
+ros2 run pipet_system_teleop system_teleop_node
+```
+
+### Mark7 단독
+
+```bash
+# 터미널 1
+ros2 launch pipet_hand_mark7_driver mark7_hardware.launch.py
+
+# 터미널 2
+ros2 run pipet_hand_mark7_teleop mark7_keyboard_teleop
+```
+
+### Mark7 가상 모드 (하드웨어 없이)
 
 ```bash
 ros2 launch pipet_hand_mark7_driver mark7_hardware.launch.py use_mock_hardware:=true use_rviz:=true
@@ -44,73 +141,44 @@ ros2 launch pipet_hand_mark7_driver mark7_hardware.launch.py use_mock_hardware:=
 
 ---
 
-## Mark7 명령 입력 방법
+## 저장 데이터 형식 (NPZ)
 
-`teleop_keyboard` 실행 후 공백으로 구분한 6개 숫자를 입력하고 Enter:
+파일명: `episodes/episode_YYYYMMDD_HHMMSS_success.npz` 또는 `_fail.npz`
 
-```
-> 100 100 100 100 0 0
-  → Thumb:100  Index:100  Middle:100  Ring :100  Pinky:0  ThAb :0
-```
-
-조인트 순서: `Thumb Flex | Index | Middle | Ring | Pinky | Thumb Ab`
-
-| 조인트 | 범위 (steps) | 설명 |
-|--------|-------------|------|
-| Thumb Flex | 0 ~ 187 | 엄지 굽힘 |
-| Index | 0 ~ 300 | 검지 굽힘 |
-| Middle | 0 ~ 300 | 중지 굽힘 |
-| Ring | 0 ~ 300 | 약지 굽힘 |
-| Pinky | 0 ~ 300 | 소지 굽힘 |
-| Thumb Ab | 0 ~ 300 | 엄지 외전 |
-
-전체 초기화: `0 0 0 0 0 0`
-
-> **주의**: 명령을 보내면 하드웨어가 해당 위치로 이동합니다. 관절이 물리적 한계에 걸리지 않도록 주의하세요.
+| 키 | Shape | dtype | 설명 |
+|----|-------|-------|------|
+| timestamps | (N,) | float64 | 녹화 시작 기준 상대 시간 |
+| joint_positions | (N, 6) | float32 | Indy7 관절 각도 (rad) |
+| joint_velocities | (N, 6) | float32 | Indy7 관절 속도 (rad/s) |
+| joint_efforts | (N, 6) | float32 | Indy7 관절 토크 (N·m) |
+| wrist_rgb_images | (N, 480, 640, 3) | uint8 | 손목 카메라 RGB |
+| wrist_depth_images | (N, 480, 640) | uint16 | 손목 카메라 Depth (mm) |
+| overhead_rgb_images | (N, 480, 640, 3) | uint8 | 오버헤드 카메라 RGB |
+| overhead_depth_images | (N, 480, 640) | uint16 | 오버헤드 카메라 Depth (mm) |
+| gripper_actions | (N,) | int8 | 0=유지, 1=잡기, 2=펴기, 3=누르기, 4=엄지 펴기 |
+| success | () | bool | 에피소드 성공 여부 |
 
 ---
 
-## 상태 모니터링
-
-```bash
-# 관절 현재 위치 (Rx 수신 시 ~0.5Hz 업데이트)
-ros2 topic echo /mark7/joint_states --once
-
-# 그리퍼 전체 상태 (position / current / temperature)
-ros2 topic echo /gripper/status --once
-
-# 직접 명령 전송 (teleop 없이)
-ros2 topic pub --once /mark7/forward_position_controller/commands \
-  std_msgs/msg/Float64MultiArray "{data: [0.0, 150.0, 150.0, 150.0, 150.0, 0.0]}"
-```
-
----
-
-## 통신 특성
-
-| 항목 | 값 |
-|------|-----|
-| 인터페이스 | USB Serial `/dev/ttyACM0`, 115200 bps |
-| Tx (PC → Hand) | 11바이트 바이너리, 명령 변경 시 1회 전송 |
-| Rx (Hand → PC) | 가변 텍스트 CSV, ~0.5Hz (1.5~2초 간격) |
-| 연속 Tx 금지 | 하드웨어가 연속 수신 시 처리 불가 |
-
----
-
-## 디렉터리 구조
+## 디렉토리 구조
 
 ```
 ros2_ws/src/
-  mark7/
-    pipet_hand_mark7_msgs/         # 커스텀 메시지 (GripperStatus, FingerState)
-    pipet_hand_mark7_description/  # URDF, 메시
-    pipet_hand_mark7_driver/       # ros2_control 드라이버 (시리얼 통신)
-    pipet_hand_mark7_teleop/       # 단독 테스트용 명령 입력 노드
-  indy7_ros2/                      # Indy7 드라이버 (서브모듈)
-docs/
-  architecture.md                  # 전체 시스템 설계
-  interface_spec.md                # ROS2 인터페이스 명세
-  mark7/architecture.md            # Mark7 모듈 상세 설계
+├── indy7_ros2/                       # Indy7 서브모듈 (5개 패키지)
+│   ├── indy_driver/                  #   로봇 드라이버 (IndyDCP3/gRPC)
+│   ├── indy_interfaces/              #   커스텀 msg/srv
+│   ├── indy_description/             #   URDF/xacro
+│   ├── indy_gazebo/                  #   Gazebo 시뮬
+│   └── indy_moveit/                  #   MoveIt2
+├── mark7/                            # Mark7 패키지 (4개)
+│   ├── pipet_hand_mark7_driver/      #   ros2_control 하드웨어 인터페이스
+│   ├── pipet_hand_mark7_msgs/        #   커스텀 msg (GripperStatus, FingerState)
+│   ├── pipet_hand_mark7_description/ #   URDF/메시
+│   └── pipet_hand_mark7_teleop/      #   단독 키보드 텔레옵
+├── pipet_data_collector/             # 통합 데이터 수집 (5토픽 동기화 + 그리퍼 캐시)
+├── pipet_system_teleop/              # 통합 텔레옵 (Indy7 + Mark7 + 녹화)
+├── pipet_inference/                  # 추론 노드 (스텁)
+└── pipet_bringup/                    # 통합 Launch 파일
 ```
 
 ---
@@ -121,4 +189,5 @@ docs/
 |------|------|
 | [docs/architecture.md](docs/architecture.md) | 전체 시스템 설계 및 데이터 흐름 |
 | [docs/interface_spec.md](docs/interface_spec.md) | ROS2 토픽/서비스 인터페이스 명세 |
+| [docs/ai_architecture.md](docs/ai_architecture.md) | AI 학습/추론 설계 (관측·행동 공간, 모델 구조) |
 | [docs/mark7/architecture.md](docs/mark7/architecture.md) | Mark7 모듈 상세 설계 및 통신 프로토콜 |
