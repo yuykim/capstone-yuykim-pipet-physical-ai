@@ -5,7 +5,7 @@ Data Collection Launch - Full system for collecting demonstration data.
 Starts:
   1. Indy7 driver (robot arm)
   2. Mark7 driver (robot hand)
-  3. RealSense D435 camera
+  3. RealSense D435 cameras (wrist + overhead)
   4. Data collector node (synchronized recording)
 
 After launch, run the teleop node in a separate terminal:
@@ -84,15 +84,37 @@ def generate_launch_description():
         }.items(),
     )
 
-    # -- 3. RealSense D435 Camera --
+    # -- 3. RealSense D435 Cameras --
 
-    realsense_node = Node(
+    # Wrist camera (mounted on robot arm endpoint)
+    wrist_camera_node = Node(
         package='realsense2_camera',
         executable='realsense2_camera_node',
         name='camera',
-        namespace='camera',
+        namespace='wrist_camera',
         output='screen',
         parameters=[{
+            'serial_no': '_844212071939',
+            'enable_color': True,
+            'enable_depth': True,
+            'enable_infra1': False,
+            'enable_infra2': False,
+            'enable_gyro': False,
+            'enable_accel': False,
+            'align_depth.enable': True,
+            'pointcloud.enable': False,
+        }],
+    )
+
+    # Overhead camera (top-down view of workspace)
+    overhead_camera_node = Node(
+        package='realsense2_camera',
+        executable='realsense2_camera_node',
+        name='camera',
+        namespace='overhead_camera',
+        output='screen',
+        parameters=[{
+            'serial_no': '_317222074298',
             'enable_color': True,
             'enable_depth': True,
             'enable_infra1': False,
@@ -128,8 +150,7 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'output_dir': LaunchConfiguration('output_dir'),
-            'image_size': 224,
-            'sync_slop': 0.1,
+            'sync_slop': 1.0,
         }],
     )
 
@@ -143,6 +164,7 @@ def generate_launch_description():
         indy_driver_launch,
         mark7_driver_launch,
         grip_preset_node,
-        realsense_node,
+        wrist_camera_node,
+        overhead_camera_node,
         data_collector_node,
     ])

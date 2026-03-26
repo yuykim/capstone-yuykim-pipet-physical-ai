@@ -87,6 +87,8 @@ class SystemTeleopNode(Node):
         # Service clients -- Data collector
         self.data_start = self.create_client(Trigger, '/data_collector/start')
         self.data_stop = self.create_client(Trigger, '/data_collector/stop')
+        self.data_mark_success = self.create_client(Trigger, '/data_collector/mark_success')
+        self.data_mark_fail = self.create_client(Trigger, '/data_collector/mark_fail')
 
         # Service clients -- Data collector gripper action logging
         self.log_grasp = self.create_client(Trigger, '/data_collector/log_grasp')
@@ -198,8 +200,24 @@ class SystemTeleopNode(Node):
     def _handle_space(self):
         if self._is_recording:
             print('\nStopping recording...')
-            if self._call_trigger(self.data_stop):
-                print('Recording stopped and saved.\n')
+            print('Result? [Y] Success / [N] Fail: ', end='', flush=True)
+            while True:
+                result_key = self.keyboard.read_one()
+                if result_key and result_key.upper() in ('Y', 'N'):
+                    break
+            is_success = result_key.upper() == 'Y'
+            if is_success:
+                self._call_trigger(self.data_mark_success)
+                print('SUCCESS')
+            else:
+                self._call_trigger(self.data_mark_fail)
+                print('FAIL')
+            print('Saving data (this may take a moment)...')
+            req = Trigger.Request()
+            future = self.data_stop.call_async(req)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=120.0)
+            if future.result() is not None and future.result().success:
+                print(f'{future.result().message}\n')
             else:
                 print('Failed to stop recording.\n')
         else:
@@ -311,27 +329,29 @@ class SystemTeleopNode(Node):
                 if not key:
                     continue
 
+                key_upper = key.upper() if len(key) == 1 else key
+
                 if key == ' ':
                     self._handle_space()
-                elif key == 'H':
+                elif key_upper == 'H':
                     self._handle_home()
-                elif key == 'D':
+                elif key_upper == 'D' and key == 'D':
                     self._handle_teaching_on()
-                elif key == 'd':
+                elif key_upper == 'D' and key == 'd':
                     self._handle_teaching_off()
-                elif key == 'G':
+                elif key_upper == 'G':
                     self._handle_grasp()
-                elif key == 'O':
+                elif key_upper == 'O':
                     self._handle_open()
-                elif key == 'P':
+                elif key_upper == 'P':
                     self._handle_press()
-                elif key == 'R':
+                elif key_upper == 'R':
                     self._handle_release()
-                elif key == 'E':
+                elif key_upper == 'E':
                     self._handle_error_recovery()
-                elif key == 'S':
+                elif key_upper == 'S':
                     self._handle_status()
-                elif key == 'Q':
+                elif key_upper == 'Q':
                     self._handle_quit()
                     break
 

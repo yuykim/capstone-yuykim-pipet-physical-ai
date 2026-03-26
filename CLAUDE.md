@@ -62,19 +62,28 @@ ros2 launch pipet_bringup data_collection.launch.py \
 ros2 run pipet_system_teleop system_teleop_node
 ```
 
-**텔레옵 키 매핑:**
+**텔레옵 키 매핑 (D/d 외 대소문자 무관):**
 | 키 | 동작 |
 |----|------|
-| SPACE | 녹화 시작/중지 |
+| SPACE | 녹화 시작/중지 (중지 시 Y/N으로 성공/실패 라벨링) |
 | H | Indy7 홈 포지션 |
 | D / d | 직접 교시 ON / OFF |
 | G | Mark7 잡기 (Grasp) |
 | O | Mark7 펴기 (Open) |
-| P | Mark7 누르기 (Press) |
-| R | Mark7 엄지 펴기 (Release) |
+| P | Mark7 누르기 (Press) — 잡은 상태 유지하며 엄지만 누름 |
+| R | Mark7 엄지 펴기 (Release) — 잡은 상태 유지하며 엄지만 펴기 |
 | E | 에러 복구 + 교시 재개 |
 | S | 상태 표시 |
 | Q | 종료 |
+
+**녹화 워크플로우:**
+1. `D`로 직접 교시 ON
+2. `SPACE`로 녹화 시작
+3. 로봇 팔을 움직이며 G/O/P/R로 그리퍼 조작
+4. `SPACE`로 녹화 중지 → `Y`(성공) 또는 `N`(실패) 입력
+5. NPZ 저장 완료 후 경로 표시 (대용량이므로 저장에 시간이 걸릴 수 있음)
+
+**데이터 수집 성능:** ~20Hz (5토픽 동기화), 640x480 원본 해상도, 에피소드당 ~1GB/분
 
 ### Indy7 단독 테스트
 
@@ -110,14 +119,14 @@ ros2 launch pipet_bringup inference.launch.py \
 
 ```
 오케스트레이터 레이어 (토픽/서비스 조합)
-  pipet_data_collector    - 4토픽 동기화 → NPZ 저장
+  pipet_data_collector    - 5토픽 동기화 + 그리퍼 캐시 → NPZ 저장
   pipet_system_teleop     - 키보드 → 모듈 서비스 호출
   pipet_inference         - 학습된 모델 → 자율 동작 (스텁)
     │
 모듈 레이어 (장치별 토픽/서비스 노출)
   indy7_ros2              - /joint_states, indy_srv
-  pipet_hand_mark7_driver - /gripper/status, /gripper/grasp|open|press
-  realsense2_camera       - /camera/.../image_raw, depth
+  pipet_hand_mark7_driver - /gripper/status, /gripper/grasp|open|press|release
+  realsense2_camera       - wrist_camera + overhead_camera (RGB/Depth)
 ```
 
 ### 패키지 구조
@@ -135,7 +144,7 @@ ros2_ws/src/
 │   ├── pipet_hand_mark7_msgs/    #   커스텀 msg (GripperStatus, FingerState)
 │   ├── pipet_hand_mark7_description/ # URDF/메시
 │   └── pipet_hand_mark7_teleop/  #   단독 키보드 텔레옵
-├── pipet_data_collector/         # 통합 데이터 수집 (4토픽 동기화)
+├── pipet_data_collector/         # 통합 데이터 수집 (5토픽 동기화 + 그리퍼 캐시, 2카메라)
 ├── pipet_system_teleop/          # 통합 텔레옵 (Indy7 + Mark7 + 녹화)
 ├── pipet_inference/              # 추론 노드 (스텁)
 └── pipet_bringup/                # 통합 Launch 파일
@@ -146,10 +155,14 @@ ros2_ws/src/
 | 이름 | 타입 | 설명 |
 |------|------|------|
 | `/joint_states` | sensor_msgs/JointState | Indy7 관절 상태 (20Hz) |
-| `/gripper/status` | GripperStatus | Mark7 손가락 상태 (20Hz) |
+| `/gripper/status` | GripperStatus | Mark7 손가락 상태 (~0.7Hz, 동기화 제외 캐시) |
 | `/mark7/joint_states` | sensor_msgs/JointState | Mark7 관절 (rad) |
 | `indy_srv` | IndyService | Indy7 명령 (홈, 교시, 복구 등) |
 | `/gripper/grasp\|open\|press\|release` | std_srvs/Trigger | Mark7 프리셋 |
+| `/wrist_camera/camera/color/image_raw` | sensor_msgs/Image | 손목 카메라 RGB |
+| `/wrist_camera/camera/aligned_depth_to_color/image_raw` | sensor_msgs/Image | 손목 카메라 Depth |
+| `/overhead_camera/camera/color/image_raw` | sensor_msgs/Image | 오버헤드 카메라 RGB |
+| `/overhead_camera/camera/aligned_depth_to_color/image_raw` | sensor_msgs/Image | 오버헤드 카메라 Depth |
 | `/data_collector/start\|stop` | std_srvs/Trigger | 녹화 제어 |
 | `/data_collector/is_recording` | std_msgs/Bool | 녹화 상태 |
 
@@ -161,9 +174,18 @@ ros2_ws/src/
 | joint_positions | (N, 6) | float32 |
 | joint_velocities | (N, 6) | float32 |
 | joint_efforts | (N, 6) | float32 |
-| rgb_images | (N, 224, 224, 3) | uint8 |
-| depth_images | (N, 224, 224) | uint16 |
+| wrist_rgb_images | (N, 480, 640, 3) | uint8 |
+| wrist_depth_images | (N, 480, 640) | uint16 |
+| overhead_rgb_images | (N, 480, 640, 3) | uint8 |
+| overhead_depth_images | (N, 480, 640) | uint16 |
 | gripper_actions | (N,) | int8 |
+| success | () | bool |
+
+**gripper_actions 값:** 0=hold, 1=grasp, 2=open, 3=press, 4=release
+
+**파일명 형식:** `episode_YYYYMMDD_HHMMSS_success.npz` 또는 `episode_YYYYMMDD_HHMMSS_fail.npz`
+
+**동기화 구조:** joint_states + wrist RGB/Depth + overhead RGB/Depth (5토픽)를 `ApproximateTimeSynchronizer`로 동기화. `/gripper/status`는 시리얼 통신 속도 제약(~0.7Hz)으로 동기화 제외, 최신값 캐시 방식.
 
 ## Dependencies
 
@@ -201,7 +223,8 @@ git submodule update --init --recursive
 |------|------|------|
 | Indy7 | 이더넷 | 192.168.1.10 |
 | Mark7 RF 동글 | USB Serial | /dev/ttyACM0, 115200 bps |
-| RealSense D435 | USB 3.0 | — |
+| RealSense D435 (손목) | USB 3.0 | S/N: 844212071939 |
+| RealSense D435 (오버헤드) | USB 3.0 | S/N: 317222074298 |
 
 ## Design Docs
 

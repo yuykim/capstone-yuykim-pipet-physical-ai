@@ -40,8 +40,10 @@ observation_t → action_t
 | `joint_velocities` | `(N, 6)`           | Indy7 관절 속도 (rad/s)                                                                              |
 | `joint_efforts`    | `(N, 6)`           | Indy7 관절 토크 (N·m)                                                                                |
 | `ee_pose`          | `(N, 7)`           | 엔드이펙터(Mark7 그리퍼 기준점)의 pose — Indy7 base 좌표계 기준 위치 `(x, y, z)` 와 자세 quaternion `(qx, qy, qz, qw)` |
-| `rgb_images`       | `(N, 224, 224, 3)` | RGB 이미지                                                                                          |
-| `depth_images`     | `(N, 224, 224)`    | Depth 이미지 (mm)                                                                                   |
+| `wrist_rgb_images`    | `(N, 480, 640, 3)` | 손목 카메라 RGB 이미지                                                                                |
+| `wrist_depth_images`  | `(N, 480, 640)`    | 손목 카메라 Depth 이미지 (mm)                                                                         |
+| `overhead_rgb_images` | `(N, 480, 640, 3)` | 오버헤드 카메라 RGB 이미지                                                                             |
+| `overhead_depth_images`| `(N, 480, 640)`   | 오버헤드 카메라 Depth 이미지 (mm)                                                                      |
 | `gripper_state`    | `(N,)`             | Mark7 실제 상태 — 이산값 `(0: 열림 / 1: 닫히는 중 / 2: 잡힘 / 3: 누름 상태)`                                        |
 
 ### Action (출력 데이터)
@@ -51,7 +53,7 @@ observation_t → action_t
 | 키                 | Shape    | 설명                                                        |
 | ----------------- | -------- | --------------------------------------------------------- |
 | `arm_actions`     | `(N, 6)` | Indy7의 다음 행동값 — 각 관절 변화량 `Δq = q[t+1] - q[t]`             |
-| `gripper_actions` | `(N,)`   | Mark7 그리퍼 액션 — 이산값 `(0: 유지 / 1: 잡기 / 2: 펴기 / 3: 파이펫 누르기)` |
+| `gripper_actions` | `(N,)`   | Mark7 그리퍼 액션 — 이산값 `(0: 유지 / 1: 잡기 / 2: 펴기 / 3: 파이펫 누르기 / 4: 엄지 펴기(release))` |
 
 ### Episode 단위 메타데이터
 
@@ -116,8 +118,10 @@ observation_t → action_t
 ```text
 observation_t =
 {
-  rgb_images[t],
-  depth_images[t],
+  wrist_rgb_images[t],
+  wrist_depth_images[t],
+  overhead_rgb_images[t],
+  overhead_depth_images[t],
   joint_positions[t],
   joint_velocities[t],
   joint_efforts[t],
@@ -170,8 +174,10 @@ arm_actions[t] = joint_positions[t+1] - joint_positions[t]
 
 ### 입력 (observation)
 
-* `rgb_images`
-* `depth_images`
+* `wrist_rgb_images`
+* `wrist_depth_images`
+* `overhead_rgb_images`
+* `overhead_depth_images`
 * `joint_positions`
 * `joint_velocities`
 * `joint_efforts`
@@ -186,7 +192,7 @@ arm_actions[t] = joint_positions[t+1] - joint_positions[t]
 즉, 학습은 다음과 같은 형태로 이루어진다.
 
 ```text
-(rgb, depth, joint state, ee pose, gripper state) → (arm delta, gripper command)
+(wrist_rgb, wrist_depth, overhead_rgb, overhead_depth, joint state, ee pose, gripper state) → (arm delta, gripper command)
 ```
 
 ---
@@ -285,6 +291,7 @@ q_target = q_current + arm_actions_t
 * `1`: `/gripper/grasp`
 * `2`: `/gripper/open`
 * `3`: `/gripper/press`
+* `4`: `/gripper/release`
 
 ---
 
@@ -318,7 +325,7 @@ q_target = q_current + arm_actions_t
 │                        ▼                                               │
 │  observation 원본 저장:                                                │
 │  joint_positions, joint_velocities, joint_efforts, ee_pose,           │
-│  rgb_images, depth_images, gripper_state, gripper_actions             │
+│  wrist_rgb/depth, overhead_rgb/depth, gripper_state, gripper_actions  │
 └──────────────────────────────┬───────────────────────────────────────┘
                                │
                                ▼
@@ -347,7 +354,8 @@ q_target = q_current + arm_actions_t
 │                                                                      │
 │  입력 (observation)                                                  │
 │  ┌────────────────────────────────────────────────────────────────┐   │
-│  │ rgb_images, depth_images, joint_positions, joint_velocities,  │   │
+│  │ wrist_rgb/depth, overhead_rgb/depth, joint_positions,          │   │
+│  │ joint_velocities,                                            │   │
 │  │ joint_efforts, ee_pose, gripper_state                         │   │
 │  └────────────────────────────────────────────────────────────────┘   │
 │                               │                                      │
@@ -381,7 +389,7 @@ q_target = q_current + arm_actions_t
 │                         추론 / 배포 레이어                            │
 │                                                                      │
 │  현재 observation 입력                                               │
-│     rgb + depth + robot state + gripper state                        │
+│     wrist_rgb + wrist_depth + overhead_rgb + overhead_depth + robot state + gripper state                        │
 │                               │                                      │
 │                               ▼                                      │
 │                         학습된 모델                                  │
@@ -391,7 +399,7 @@ q_target = q_current + arm_actions_t
 │       arm_actions_t                      gripper_actions_t           │
 │              │                                 │                     │
 │              ▼                                 ▼                     │
-│ q_target = q_current + arm_actions_t      grasp / open / press 호출  │
+│ q_target = q_current + arm_actions_t  grasp/open/press/release 호출  │
 │              │                                 │                     │
 │              └────────────────┬────────────────┘                     │
 │                               ▼                                      │
@@ -408,7 +416,7 @@ Indy7 직접 교시 + Mark7 키보드 조작 + RealSense RGB/Depth
         ↓
 [동기화 및 저장]
 observation 원본 저장
-(joint, ee_pose, rgb, depth, gripper_state, gripper_actions)
+(joint, ee_pose, wrist_rgb, wrist_depth, overhead_rgb, overhead_depth, gripper_state, gripper_actions)
         ↓
 [데이터셋 구성]
 arm_actions 생성
@@ -416,7 +424,7 @@ arm_actions 생성
 observation_t → action_t 샘플 생성
         ↓
 [학습]
-입력: rgb, depth, joint state, ee_pose, gripper_state
+입력: wrist_rgb, wrist_depth, overhead_rgb, overhead_depth, joint state, ee_pose, gripper_state
 출력: arm_actions, gripper_actions
 방법: Behavior Cloning
         ↓
