@@ -1,3 +1,6 @@
+* [Raw 데이터 정의 문서](./ai_architecture.md)
+* [LeRobotDataset v3.0 관련 문서](./lerobot_architecture.md)
+
 ai/indy7_lerobot/
 ├── raw_data/          # 원본 수집 로그
 ├── datasets/          # 변환된 LeRobot 형식 데이터셋
