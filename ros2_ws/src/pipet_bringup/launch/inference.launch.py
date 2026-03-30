@@ -33,12 +33,23 @@ def generate_launch_description():
     use_mock_mark7_arg = DeclareLaunchArgument(
         'use_mock_mark7', default_value='false',
     )
-    model_path_arg = DeclareLaunchArgument(
-        'model_path', description='Path to trained model file',
+    policy_path_arg = DeclareLaunchArgument(
+        "policy_path",
+        description="Path to a trained LeRobot policy checkpoint folder (contains config.json + *.safetensors).",
     )
-    model_type_arg = DeclareLaunchArgument(
-        'model_type', default_value='lerobot',
-        description='Model type: lerobot / robomimic',
+    dataset_root_arg = DeclareLaunchArgument(
+        "dataset_root",
+        description="Path to the converted LeRobotDataset local root folder (contains meta/info.json & meta/stats.json).",
+    )
+    dataset_repo_id_arg = DeclareLaunchArgument(
+        "dataset_repo_id",
+        default_value="pipet_dataset",
+        description="repo_id stored in dataset meta/info.json (must match your conversion output repo_id).",
+    )
+    task_arg = DeclareLaunchArgument(
+        "task",
+        default_value="Pick up the pipette",
+        description="Task string passed to the policy.",
     )
     inference_hz_arg = DeclareLaunchArgument(
         'inference_hz', default_value='15.0',
@@ -76,22 +87,48 @@ def generate_launch_description():
         }.items(),
     )
 
-    # -- 3. RealSense D435 Camera --
+    # -- 3. RealSense D435 Cameras (wrist + overhead) --
 
-    realsense_node = Node(
-        package='realsense2_camera',
-        executable='realsense2_camera_node',
-        name='camera',
-        namespace='camera',
-        output='screen',
-        parameters=[{
-            'enable_color': True,
-            'enable_depth': True,
-            'enable_infra1': False,
-            'enable_infra2': False,
-            'align_depth.enable': True,
-            'pointcloud.enable': False,
-        }],
+    wrist_camera_node = Node(
+        package="realsense2_camera",
+        executable="realsense2_camera_node",
+        name="camera",
+        namespace="wrist_camera",
+        output="screen",
+        parameters=[
+            {
+                "serial_no": "_844212071939",
+                "enable_color": True,
+                "enable_depth": True,
+                "enable_infra1": False,
+                "enable_infra2": False,
+                "enable_gyro": False,
+                "enable_accel": False,
+                "align_depth.enable": True,
+                "pointcloud.enable": False,
+            }
+        ],
+    )
+
+    overhead_camera_node = Node(
+        package="realsense2_camera",
+        executable="realsense2_camera_node",
+        name="camera",
+        namespace="overhead_camera",
+        output="screen",
+        parameters=[
+            {
+                "serial_no": "_317222074298",
+                "enable_color": True,
+                "enable_depth": True,
+                "enable_infra1": False,
+                "enable_infra2": False,
+                "enable_gyro": False,
+                "enable_accel": False,
+                "align_depth.enable": True,
+                "pointcloud.enable": False,
+            }
+        ],
     )
 
     # -- 4. Inference Node --
@@ -102,8 +139,10 @@ def generate_launch_description():
         name='inference_node',
         output='screen',
         parameters=[{
-            'model_path': LaunchConfiguration('model_path'),
-            'model_type': LaunchConfiguration('model_type'),
+            "policy_path": LaunchConfiguration("policy_path"),
+            "dataset_root": LaunchConfiguration("dataset_root"),
+            "dataset_repo_id": LaunchConfiguration("dataset_repo_id"),
+            "task": LaunchConfiguration("task"),
             'inference_hz': LaunchConfiguration('inference_hz'),
         }],
     )
@@ -113,11 +152,14 @@ def generate_launch_description():
         indy_type_arg,
         mark7_port_arg,
         use_mock_mark7_arg,
-        model_path_arg,
-        model_type_arg,
+        policy_path_arg,
+        dataset_root_arg,
+        dataset_repo_id_arg,
+        task_arg,
         inference_hz_arg,
         indy_driver_launch,
         mark7_driver_launch,
-        realsense_node,
+        wrist_camera_node,
+        overhead_camera_node,
         inference_node,
     ])

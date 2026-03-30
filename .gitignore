@@ -22,6 +22,9 @@ ros2_ws/log/
 datasets
 raw_data
 
+# LeRobot 테스트 산출물/아티팩트 (커밋 금지)
+ai/lerobot_source/lerobot/tests/artifacts/
+
 # 기타
 .DS_Store
 *.swp

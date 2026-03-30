@@ -79,6 +79,11 @@ coverage.xml
 *.py,cover
 !tests/artifacts
 
+# NOTE(pipet-physical-ai):
+# This repo vendors LeRobot sources for reference, but we do NOT want to track
+# generated test artifacts in our main project repository.
+tests/artifacts/
+
 ### Logs & Temporary Files ###
 logs/
 tmp/

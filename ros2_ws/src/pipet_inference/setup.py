@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'inference_node = pipet_inference.inference_node:main',
+            'virtual_episode_replay_node = pipet_inference.virtual_episode_replay_node:main',
         ],
     },
 )
