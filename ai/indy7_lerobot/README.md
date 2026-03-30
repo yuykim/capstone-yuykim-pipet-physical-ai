@@ -1,3 +1,4 @@
+
 ai/indy7_lerobot/
 ├── raw_data/          # 원본 수집 로그
 ├── datasets/          # 변환된 LeRobot 형식 데이터셋
