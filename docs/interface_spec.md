@@ -121,7 +121,7 @@ string message
 
 | 파라미터 | 타입 | 기본값 | 설명 |
 |----------|------|--------|------|
-| `indy_ip` | string | `"127.0.0.1"` | 로봇 IP 주소 |
+| `indy_ip` | string | `"192.168.1.10"` | 로봇 IP 주소 |
 | `indy_type` | string | `"indy7"` | 로봇 모델 종류 |
 
 ---
@@ -132,14 +132,18 @@ string message
 
 #### 발행 토픽
 
-토픽 이름은 `/{camera_namespace}/{camera_name}/` 접두사를 가진다. 기본값 기준으로 `/camera/camera/` 이다.
+듀얼 카메라 구성: 손목 카메라(wrist)와 오버헤드 카메라(overhead). 토픽 이름은 `/{camera_namespace}/{camera_name}/` 접두사를 가진다.
 
 | 토픽 | 타입 | 설명 |
 |------|------|------|
-| `/camera/camera/color/image_raw` | sensor_msgs/Image | RGB 이미지, 기본 30Hz |
-| `/camera/camera/color/camera_info` | sensor_msgs/CameraInfo | RGB 카메라 내부 파라미터 |
-| `/camera/camera/aligned_depth_to_color/image_raw` | sensor_msgs/Image | Color에 정렬된 Depth 이미지 |
-| `/camera/camera/aligned_depth_to_color/camera_info` | sensor_msgs/CameraInfo | Depth 카메라 내부 파라미터 |
+| `/wrist_camera/camera/color/image_raw` | sensor_msgs/Image | 손목 카메라 RGB 이미지, 기본 30Hz |
+| `/wrist_camera/camera/color/camera_info` | sensor_msgs/CameraInfo | 손목 카메라 RGB 내부 파라미터 |
+| `/wrist_camera/camera/aligned_depth_to_color/image_raw` | sensor_msgs/Image | 손목 카메라 Color에 정렬된 Depth 이미지 |
+| `/wrist_camera/camera/aligned_depth_to_color/camera_info` | sensor_msgs/CameraInfo | 손목 카메라 Depth 내부 파라미터 |
+| `/overhead_camera/camera/color/image_raw` | sensor_msgs/Image | 오버헤드 카메라 RGB 이미지, 기본 30Hz |
+| `/overhead_camera/camera/color/camera_info` | sensor_msgs/CameraInfo | 오버헤드 카메라 RGB 내부 파라미터 |
+| `/overhead_camera/camera/aligned_depth_to_color/image_raw` | sensor_msgs/Image | 오버헤드 카메라 Color에 정렬된 Depth 이미지 |
+| `/overhead_camera/camera/aligned_depth_to_color/camera_info` | sensor_msgs/CameraInfo | 오버헤드 카메라 Depth 내부 파라미터 |
 
 #### 런치 파라미터
 
@@ -197,6 +201,7 @@ float32 temperature # 온도 (°C)
 | `/gripper/grasp` | std_srvs/Trigger | 파이펫 잡기 프리셋 실행 |
 | `/gripper/open` | std_srvs/Trigger | 손 펴기 프리셋 실행 |
 | `/gripper/press` | std_srvs/Trigger | 파이펫 누르기 프리셋 실행 |
+| `/gripper/release` | std_srvs/Trigger | 엄지 펴기 프리셋 실행 (잡은 상태 유지) |
 
 #### 런치 파라미터
 
@@ -217,11 +222,13 @@ float32 temperature # 온도 (°C)
 | 토픽 | 타입 | 출처 |
 |------|------|------|
 | `/joint_states` | sensor_msgs/JointState | Indy7 모듈 |
-| `/camera/camera/color/image_raw` | sensor_msgs/Image | RealSense 모듈 |
-| `/camera/camera/aligned_depth_to_color/image_raw` | sensor_msgs/Image | RealSense 모듈 |
+| `/wrist_camera/camera/color/image_raw` | sensor_msgs/Image | 손목 카메라 (RealSense) |
+| `/wrist_camera/camera/aligned_depth_to_color/image_raw` | sensor_msgs/Image | 손목 카메라 (RealSense) |
+| `/overhead_camera/camera/color/image_raw` | sensor_msgs/Image | 오버헤드 카메라 (RealSense) |
+| `/overhead_camera/camera/aligned_depth_to_color/image_raw` | sensor_msgs/Image | 오버헤드 카메라 (RealSense) |
 | `/gripper/status` | pipet_hand_mark7_msgs/GripperStatus | Mark7 모듈 |
 
-동기화 방식: `ApproximateTimeSynchronizer` (~15Hz)
+동기화 방식: 5토픽 동기화 + 그리퍼 캐시, ~20Hz
 
 #### 제공 서비스
 
@@ -238,7 +245,7 @@ float32 temperature # 온도 (°C)
 
 #### NPZ 저장 형식
 
-저장 경로: `episodes/episode_<YYYYMMDD_HHMMSS>.npz`
+저장 경로: `episodes/episode_<YYYYMMDD_HHMMSS>_<success|fail>.npz`
 
 | 키 | Shape | dtype | 설명 |
 |----|-------|-------|------|
@@ -246,9 +253,12 @@ float32 temperature # 온도 (°C)
 | `joint_positions` | (N, 6) | float32 | Indy7 관절 각도 (rad) |
 | `joint_velocities` | (N, 6) | float32 | Indy7 관절 속도 (rad/s) |
 | `joint_efforts` | (N, 6) | float32 | Indy7 관절 토크 (N·m) |
-| `rgb_images` | (N, 224, 224, 3) | uint8 | RGB 이미지 |
-| `depth_images` | (N, 224, 224) | uint16 | Depth 이미지 (mm) |
-| `gripper_actions` | (N,) | int8 | 그리퍼 액션 이산값: 0=유지 / 1=잡기 / 2=펴기 / 3=파이펫 누르기 |
+| `wrist_rgb_images` | (N, 480, 640, 3) | uint8 | 손목 카메라 RGB 이미지 |
+| `wrist_depth_images` | (N, 480, 640) | uint16 | 손목 카메라 Depth 이미지 (mm) |
+| `overhead_rgb_images` | (N, 480, 640, 3) | uint8 | 오버헤드 카메라 RGB 이미지 |
+| `overhead_depth_images` | (N, 480, 640) | uint16 | 오버헤드 카메라 Depth 이미지 (mm) |
+| `gripper_actions` | (N,) | int8 | 그리퍼 액션 이산값: 0=유지 / 1=잡기 / 2=펴기 / 3=파이펫 누르기 / 4=엄지 펴기(release) |
+| `success` | () | bool | 에피소드 성공 여부 |
 
 #### 런치 파라미터
 
@@ -275,7 +285,10 @@ float32 temperature # 온도 (°C)
 | `G` | Mark7 잡기 | `/gripper/grasp` | std_srvs/Trigger |
 | `O` | Mark7 펴기 | `/gripper/open` | std_srvs/Trigger |
 | `P` | Mark7 파이펫 누르기 | `/gripper/press` | std_srvs/Trigger |
+| `R` | Mark7 엄지 펴기 (release) | `/gripper/release` | std_srvs/Trigger |
 | `Q` | 노드 종료 | — | — |
+
+> **참고**: `D`/`d`는 대소문자를 구분한다 (대문자=교시 ON, 소문자=교시 OFF). 나머지 키는 대소문자 구분 없이 동작한다.
 
 #### 구독 토픽
 
@@ -294,8 +307,10 @@ float32 temperature # 온도 (°C)
 | 토픽 | 타입 | 설명 |
 |------|------|------|
 | `/joint_states` | sensor_msgs/JointState | Indy7 관절 상태 |
-| `/camera/camera/color/image_raw` | sensor_msgs/Image | RGB 이미지 |
-| `/camera/camera/aligned_depth_to_color/image_raw` | sensor_msgs/Image | Depth 이미지 |
+| `/wrist_camera/camera/color/image_raw` | sensor_msgs/Image | 손목 카메라 RGB 이미지 |
+| `/wrist_camera/camera/aligned_depth_to_color/image_raw` | sensor_msgs/Image | 손목 카메라 Depth 이미지 |
+| `/overhead_camera/camera/color/image_raw` | sensor_msgs/Image | 오버헤드 카메라 RGB 이미지 |
+| `/overhead_camera/camera/aligned_depth_to_color/image_raw` | sensor_msgs/Image | 오버헤드 카메라 Depth 이미지 |
 
 #### 호출하는 서비스 (클라이언트)
 
