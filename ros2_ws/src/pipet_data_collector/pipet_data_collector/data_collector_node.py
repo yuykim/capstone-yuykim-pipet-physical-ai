@@ -305,8 +305,10 @@ class DataCollectorNode(Node):
             label = 'fail'
         else:
             label = 'unlabeled'
+        save_dir = os.path.join(self.output_dir, label)
+        os.makedirs(save_dir, exist_ok=True)
         filename = f'episode_{timestamp_str}_{label}.npz'
-        filepath = os.path.join(self.output_dir, filename)
+        filepath = os.path.join(save_dir, filename)
 
         np.savez_compressed(
             filepath,

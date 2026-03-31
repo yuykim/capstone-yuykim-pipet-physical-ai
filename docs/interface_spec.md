@@ -245,7 +245,7 @@ float32 temperature # 온도 (°C)
 
 #### NPZ 저장 형식
 
-저장 경로: `episodes/episode_<YYYYMMDD_HHMMSS>_<success|fail>.npz`
+저장 경로: `episodes/<success|fail|unlabeled>/episode_<YYYYMMDD_HHMMSS>_<label>.npz`
 
 | 키 | Shape | dtype | 설명 |
 |----|-------|-------|------|
