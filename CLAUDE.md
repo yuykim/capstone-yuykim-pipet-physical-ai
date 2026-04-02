@@ -185,6 +185,14 @@ ros2_ws/src/
 
 **파일명 형식:** `episode_YYYYMMDD_HHMMSS_success.npz` 또는 `episode_YYYYMMDD_HHMMSS_fail.npz`
 
+**저장 경로:** 성공/실패에 따라 서브폴더로 분류 저장
+```
+episodes/
+├── success/   # Y 입력 시
+├── fail/      # N 입력 시
+└── unlabeled/ # 라벨 없는 경우
+```
+
 **동기화 구조:** joint_states + wrist RGB/Depth + overhead RGB/Depth (5토픽)를 `ApproximateTimeSynchronizer`로 동기화. `/gripper/status`는 시리얼 통신 속도 제약(~0.7Hz)으로 동기화 제외, 최신값 캐시 방식.
 
 ## Dependencies
