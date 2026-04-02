@@ -38,6 +38,30 @@ ping 192.168.1.10
 > **트러블슈팅:** `ping 192.168.1.10` 실패 시 → ① 로봇 컨트롤러 전원 확인 ② 이더넷 케이블 확인 ③ `ip addr show enx00e04c360046`에서 IP 할당 확인.
 > gRPC 포트 연결 실패(`nc -zv 192.168.1.10 20001`) → 로봇 컨트롤러 재부팅 후 2~3분 대기.
 
+> **sirlab public laptop 네트워크 설정 메모 (이번에 성공한 방법)**
+>
+> 로봇 이더넷 인터페이스는 `enx00e04c360046` 였지만, `nmcli con mod enx00e04c360046 ...` 는 “unknown connection” 오류가 났습니다.
+> 원인은 `nmcli con mod`가 받는 값이 “인터페이스 이름(ifname)”이 아니라 “NetworkManager connection name”이기 때문입니다.
+>
+> 그래서 기존 connection을 수정하기보다, 해당 인터페이스에 새 connection을 만들어 고정 IP를 할당했습니다.
+>
+> ```bash
+> # (1) connection 생성: con-name은 아무 이름으로 해도 되지만, 여기서는 indy7-static으로 지정
+> sudo nmcli con add type ethernet ifname enx00e04c360046 con-name indy7-static \
+>   ipv4.addresses 192.168.1.100/24 ipv4.method manual \
+>   ipv6.method ignore autoconnect yes
+>
+> # (2) 연결 적용
+> sudo nmcli con up indy7-static
+>
+> # (3) IPv4 확인
+> ip addr show enx00e04c360046 | grep inet
+> # -> inet 192.168.1.100/24 가 보여야 함
+>
+> # (4) 로봇 통신 확인
+> ping 192.168.1.10
+> ```
+
 ### 1. 의존성 설치
 
 ```bash
