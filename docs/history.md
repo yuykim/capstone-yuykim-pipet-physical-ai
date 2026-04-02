@@ -110,3 +110,97 @@ python3 -m pip install --user 'empy==3.3.4'
 - 같은 `python3`라도 시스템 파이썬(`/usr/bin/python3.10` 등)과 conda 파이썬(`/home/.../miniconda3/bin/python3`)이 섞여 사용될 수 있다.
 - 따라서 실패 로그에 찍히는 파이썬 경로(`/miniconda3/bin/python3`, `/usr/bin/python3`)를 보고,
   그 경로의 파이썬에 맞춰 패키지를 설치하는 방식으로 접근하면 수렴이 빠르다.
+
+---
+
+## 로봇 데이터 수집 중단 문제 (Mark7 동글 /dev/ttyACM0 권한)
+
+### 1) 초기 증상: `data_collection.launch.py`가 실행 직후 중단
+- `ros2 launch pipet_bringup data_collection.launch.py indy_ip:=192.168.1.10` 실행 중,
+  `Mark7SystemHardware` 단계에서 활성화가 실패하며 프로세스가 abort됨.
+
+### 2) 핵심 에러 로그
+- `Mark7SystemHardware`: 시리얼 포트 열기 실패: `/dev/ttyACM0`
+
+### 3) 원인
+- `/dev/ttyACM0`는 소유자 `root`, 그룹 `dialout` 권한(`crw-rw----`) 형태로 존재했음.
+- 당시 현재 세션의 사용자 그룹에 `dialout`이 포함되어 있지 않아,
+  사용자 계정으로 `/dev/ttyACM0`를 열 수 없었음.
+- 실제로 확인: 사용자로 `os.open('/dev/ttyACM0', ...)` 수행 시 `PermissionError: [Errno 13] Permission denied`가 발생.
+
+### 4) 해결 과정
+#### (1) dialout 그룹 권한 추가
+```bash
+sudo usermod -aG dialout $USER
+newgrp dialout
+```
+
+#### (2) 세션 그룹 갱신 문제 확인 및 즉시 우회
+- `newgrp dialout` 이후에도 현재 세션의 `groups` 출력에는 `dialout`이 반영되지 않은 상태로 보였고,
+  `/dev/ttyACM0` 오픈이 계속 실패함.
+- `sg dialout`로 해당 명령을 dialout 그룹 권한으로 실행했을 때는,
+  `/dev/ttyACM0` 오픈이 성공(`open ok`)했음.
+
+예시:
+```bash
+sg dialout -c "python3 - <<'PY'\nimport os\nfd=os.open('/dev/ttyACM0', os.O_RDWR|os.O_NOCTTY)\nprint('open ok')\nos.close(fd)\nPY"
+```
+
+### 5) 이후 조치
+- 권한 반영이 확실해진 상태에서 `data_collection.launch.py`(터미널 1)와 `system_teleop_node`(터미널 2)를 다시 실행하여,
+  `data_collector_node`가 정상적으로 살아있는지(카메라 토픽 포함) 확인하는 것으로 마무리.
+
+---
+
+## Direct teaching(교시/핸드가이드) 미동작 문제 및 해결 (옵션 A: `colcon_ws` 유지)
+
+### 1) 초기 증상
+- 녹화(SPACE)는 성공적으로 시작/중지되고 저장도 되지만,
+  텔레옵에서 `D`(Direct teaching ON)를 눌러도 로봇이 “직접 교시/핸드가이드” 모드로 전환되지 않는다고 판단됨.
+
+### 2) 원인 분석(코드 매핑 불일치)
+- `pipet_system_teleop/system_teleop_node.py`에서 `D`를 누르면 `indy_srv`에 `IndyService.Request().data = 9`를 호출하도록 구현되어 있음.
+- 그런데 실제 Indy7 드라이버( `indy_driver` )의 `indy_srv_callback()`은 `request.data`에 대해 `1~8`(Recover/Home/Teleop start/stop 등)만 처리 로직이 있었고,
+  `9/10`에 대한 직접 teaching 로직이 없었음.
+- 결과적으로 서비스 호출은 `success=True`로 반환될 수 있으나, 로봇 컨트롤러 입장에서는 teaching 모드가 켜지지 않는 상태가 발생.
+
+### 3) 해결(Indy driver에 9/10 핸들러 추가)
+- 우리 리포지토리(`pipet-physical-ai/ros2_ws`)가 아닌,
+  Indy 드라이버 소스가 있는 외부 작업공간인 `colcon_ws`에 패치를 적용하고 재빌드함.
+
+적용한 변경:
+- `colcon_ws/src/indy-ros2/indy_driver/indy_driver/indy_define.py`
+  - `MSG_DIRECT_TEACHING_ON  = 9`
+  - `MSG_DIRECT_TEACHING_OFF = 10`
+- `colcon_ws/src/indy-ros2/indy_driver/indy_driver/indy_driver/indy_driver.py`
+  - `request.data == 9`일 때 `IndyDCP3.set_direct_teaching(enable=True)` 호출
+  - `request.data == 10`일 때 `IndyDCP3.set_direct_teaching(enable=False)` 호출
+
+### 4) 반영 방법
+- 위 패치 후 `colcon_ws`에서 `indy_driver`를 다시 빌드한 다음,
+  실제 로봇을 띄우는 `data_collection.launch.py`를 다시 실행해서 변경이 로드되도록 함.
+
+### 5) 현재 상태(옵션 A 유지)
+- Indy 관련 패치는 `colcon_ws`에 유지(옵션 A)하고,
+  `pipet-physical-ai` 리포지토리 코드 수정은 최소화하는 방향으로 진행 중.
+
+---
+
+## 로봇 데이터 수집 최종 성공 확인(현재 상태)
+
+### 1) ttyACM0 권한 이슈 해결(Mark7 동글)
+- 초기에는 `ros2_control_node`/`Mark7SystemHardware`에서 `/dev/ttyACM0` 시리얼 포트 열기 실패로 백엔드가 죽었음.
+- 현재는 `dialout` 권한이 정상 반영된 상태에서(필요 시 `sg dialout`로 백엔드를 실행) `Mark7` 구동이 안정적으로 동작함.
+
+### 2) Direct teaching + 데이터 수집 동시 정상 동작
+- `colcon_ws`의 Indy 드라이버에 직접 teaching(enable/disable: data=9/10) 처리를 추가한 뒤,
+  `data_collection.launch.py`를 재실행하고 텔레옵에서 `D`(Direct teaching ON) 및 `SPACE`(녹화 시작/중지) 절차를 수행함.
+- 그 결과 데이터 수집이 정상 진행되었고, `data_collector_node`가 `Recording started` 로그 이후 저장까지 완료되는 것을 확인함.
+
+### 3) 사용 절차(운영 관점 요약)
+- 백엔드(터미널 1): `ros2 launch pipet_bringup data_collection.launch.py indy_ip:=192.168.1.10` 실행(필요 시 `sg dialout`로 감싸서)
+- 텔레옵(터미널 2): `ros2 run pipet_system_teleop system_teleop_node` 실행
+- 텔레옵 키:
+  - `D` : Direct teaching ON
+  - `SPACE` : 녹화 시작/중지
+  - 중지 후 `Y/N` : 성공/실패 라벨링
