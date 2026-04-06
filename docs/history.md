@@ -306,3 +306,24 @@ print("fraction all joints |dq|<1e-4:", (np.abs(dq) < 1e-4).all(axis=1).mean())
 - 추론 런치: `ros2_ws/src/pipet_bringup/launch/inference.launch.py`.
 - NPZ 수집: `ros2_ws/src/pipet_data_collector/pipet_data_collector/data_collector_node.py` (`/joint_states`의 `position` 앞 6개를 저장).
 - 인터페이스 명세: `docs/interface_spec.md` (궤적 토픽·`indy_srv` 코드 등).
+
+---
+
+## 26.04.07 학습 설정 변경 반영 (ACT)
+
+`ai/lerobot/run_lerobot_train.py` 기준으로, 다음 학습 설정을 기본 실행값으로 반영했다.
+
+- `policy.use_vae`: `false`
+- `policy.chunk_size`: `40` (기존 100)
+- `policy.n_action_steps`: `40` (기존 100)
+- `policy.use_amp`: `true`
+- `batch_size`: `8` 유지
+- `dataset.use_imagenet_stats`: `true` 유지
+
+또한 이미지 해상도는 한 단계 축소하기 위해 변환 래퍼 기본값을 아래처럼 변경했다.
+
+- `--image_resize_to` 기본값: `360x480` (기존 빈 값/원본 해상도 유지)
+
+주의:
+- 위 값은 `python ai/lerobot/run_lerobot_train.py ...` 래퍼 경로에서 자동 적용된다.
+- 체크포인트 구조(`chunk_size` 등)가 바뀌므로 기존 100-step 설정 모델과는 호환되지 않을 수 있어, 새 설정으로는 재학습을 전제로 한다.

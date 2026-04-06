@@ -15,6 +15,13 @@
   2) NPZ를 LeRobotDataset v3.0 폴더로 변환한다( meta/info.json, meta/stats.json 생성 ).
   3) `lerobot-train` 실행 시 `--dataset.root`에 위 폴더 경로를 넣어 학습한다.
 
+기본 학습 하이퍼파라미터(ACT):
+  - `policy.chunk_size` / `policy.n_action_steps`: 40
+  - `policy.use_vae`: false
+  - `policy.use_amp`: true
+  - `batch_size`: 8
+  - `dataset.use_imagenet_stats`: true
+
 이 래퍼를 두는 이유:
   - 팀이 동일한 명령/옵션으로 반복 실행하기 쉽게(재현성)
   - `--dataset.root` 같은 핵심 플래그를 빼먹지 않도록
@@ -48,7 +55,11 @@ def main() -> None:
     parser.add_argument("--eval_freq", type=int, default=10_000)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--image_resize_to", default="", help="Optional HxW, e.g. 480x640")
+    parser.add_argument(
+        "--image_resize_to",
+        default="360x480",
+        help="Optional HxW resize for conversion (default: 360x480).",
+    )
 
     parser.add_argument("--skip_convert", action="store_true", help="Skip NPZ -> LeRobotDataset conversion.")
     args = parser.parse_args()
@@ -106,6 +117,16 @@ def main() -> None:
         str(args.steps),
         "--eval_freq",
         str(args.eval_freq),
+        "--policy.chunk_size",
+        "40",
+        "--policy.n_action_steps",
+        "40",
+        "--policy.use_vae",
+        "false",
+        "--policy.use_amp",
+        "true",
+        "--dataset.use_imagenet_stats",
+        "true",
     ]
 
     run(cmd_train)
