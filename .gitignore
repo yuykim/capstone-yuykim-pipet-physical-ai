@@ -21,6 +21,8 @@ ros2_ws/log/
 *.npz
 datasets
 raw_data
+ai/pipet_train_outputs/
+ai/training_data/
 
 # LeRobot 테스트 산출물/아티팩트 (커밋 금지)
 ai/lerobot_source/lerobot/tests/artifacts/

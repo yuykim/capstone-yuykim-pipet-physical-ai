@@ -204,3 +204,105 @@ sg dialout -c "python3 - <<'PY'\nimport os\nfd=os.open('/dev/ttyACM0', os.O_RDWR
   - `D` : Direct teaching ON
   - `SPACE` : 녹화 시작/중지
   - 중지 후 `Y/N` : 성공/실패 라벨링
+
+---
+
+# 26.04.06 작성자: 김유영
+
+## 추론(LeRobot ACT) 배포: 그리퍼는 동작·Indy7 팔은 거의 안 움직임 (26.04.07 정리)
+
+### 1) 초기 증상
+- `inference.launch.py` + ZMQ 사이드카(`zmq_act_server`)로 학습된 ACT 체크포인트를 올려 자율 추론 시,
+  **Mark7 그리퍼(프리셋 서비스)는 반응**하는데 **Indy7 팔은 눈에 띄게 움직이지 않는다**고 판단됨.
+- 로그상 `delta_norm`이 매우 작게 찍히는 경우가 있었음.
+
+### 2) ROS 그래프 점검: 궤적 토픽은 연결됨
+- `ros2 topic list`에 `/joint_trajectory_controller/joint_trajectory`가 보인다고 해서 **구독자가 있다고 단정할 수는 없음**
+  (`inference_node`가 퍼블리셔만 있어도 토픽 이름은 목록에 뜰 수 있음).
+- 실제 확인 명령:
+```bash
+ros2 topic info /joint_trajectory_controller/joint_trajectory -v
+```
+- 결과(해당 PC 기준):
+  - **Publisher**: `inference_node` (1)
+  - **Subscription**: `indy_driver` (1)
+- 결론: **“토픽이 안 닿아서”가 아님** — 메시지는 드라이버까지 도달하는 연결 구조가 맞음.
+
+### 3) 팔이 여전히 안 움직일 때 추가로 볼 것 (환경/모드)
+- **직접 교시(D) ON** 상태에서는 궤적 명령이 기대와 다르게 동작하거나 무시되는 경우가 있을 수 있음 → 자율 전 **교시 OFF** 권장.
+- `/joint_states`와 궤적의 **`joint_names` 순서·이름**이 Indy 6축과 일치하는지 `ros2 topic echo`로 교차 확인.
+- 정책과 무관하게 드라이버만 검증하려면, `JointTrajectory`를 수동 `ros2 topic pub` 등으로 소량 발행해 반응 여부를 분리 진단 가능.
+
+### 4) 학습 데이터 통계(`ai/training_data/meta/stats.json`)와 액션 정의
+- NPZ→LeRobot 변환(`ai/data_conversion/npz_to_lerobot/convert.py`)에서 액션은
+  **`action = [delta_q (6), gripper_action]`**, `delta_q[t] = joint_positions[t+1] - joint_positions[t]` (20Hz 인접 프레임 차이).
+- 동일 루트의 `stats.json`에서 `action`의 `delta_q` 차원은 **스텝당 변화가 대부분 매우 작은 분포**로 나타남(평균·분위수 기준).
+- 해석: **“모델이 팔을 학습 못했다”기보다**, 학습 타깃 자체가 **프레임 간 델타가 작은 샘플이 많은 분포**이면 ACT가 **작은 델타를 예측**하는 것이 손실 관점에서 자연스러움.
+
+### 5) 원시 NPZ로 검증 (에피소드 `episode_20260402_180823_success.npz` 예시)
+- 스크립트 경로 주의: **`/~/path`는 잘못된 경로**(틸드는 `/` 뒤에서 확장되지 않음). 아래처럼 `pathlib.Path.expanduser()` 사용 권장.
+
+```python
+import numpy as np
+from pathlib import Path
+p = Path("~/2026capstone2_ws/pipet-physical-ai/ros2_ws/episodes/success/episode_20260402_180823_success.npz").expanduser()
+d = np.load(p)
+q = d["joint_positions"]
+dq = np.diff(q, axis=0)
+print("per-step |dq| mean:", np.abs(dq).mean(axis=0))
+print("per-step |dq| max :", np.abs(dq).max(axis=0))
+print("fraction all joints |dq|<1e-4:", (np.abs(dq) < 1e-4).all(axis=1).mean())
+```
+
+- 해당 파일에서 관측된 요약(참고):
+  - 프레임 수 약 1213, 스텝 1212.
+  - 관절 0~4: 스텝당 `|dq|` **평균**은 대략 **1e-4 ~ 1e-3 rad** 수준, **최대**는 일부 축에서 **~1e-2 ~ 3e-2 rad**까지 존재(순간 움직임은 기록됨).
+  - **6축 모두 `|dq|<1e-4`인 스텝 비율 ≈ 0.52** → 절반 가까운 스텝은 “거의 정지”에 가까움.
+  - **6번째 축(인덱스 5)** 은 이 에피소드에서 **거의 변하지 않음**(max가 ~1e-5 rad 수준) → 학습/추론에서 해당 축이 0에 가깝게 나오는 것이 데이터와 일치.
+
+### 6) “자주 움직여야 하는 축도 추론에서 잘 안 움직인다”에 대한 요약 설명
+- 정책은 “이 축은 과제상 중요” 같은 **라벨 없이**, **스텝마다 전 관절 델타의 통계**를 맞추는 회귀에 가깝게 학습됨.
+- 사람이 느끼는 “몇 초 동안 계속 움직였다”와 **20Hz 스텝 단위 델타**는 다름: 정지·미세 조정이 섞이면 **평균 스텝 델타는 작게** 나오기 쉬움.
+- **드문 큰 델타(분포의 꼬리)** 는 빈도가 낮아 출력이 **평균 쪽으로 눌리는(평활)** 경향이 있음.
+- 액션 **mean/std 정규화**는 작은 분산을 가진 축에서 “출력이 작게 나오기”를 더 강화할 수 있음.
+
+### 7) 학습 프로토콜 개선 아이디어 (기록 전용 — **아직 코드/운영에 적용하지 않음**)
+
+아래는 Indy7 팔 델타가 데이터·학습 분포상 작게 잡히는 문제를 완화하기 위한 **검토용 아이디어**만 정리한 것이다. 당시 리포지토리에는 반영하지 않았다.
+
+#### 7-1) 수집 프로토콜 (효과 대비 비용이 상대적으로 낮음)
+- **정지 구간 줄이기**: 녹화 중 자세만 잡고 멈춰 있는 시간이 길수록 “스텝당 델타 ≈ 0” 샘플 비율이 늘어난다.
+- **스텝당 델타를 키우는 움직임**: 천천히라도 **한 번에 충분한 각도**를 움직이면 20Hz에서도 `delta_q`가 커진다. 미세 조정만 길게 이어지면 통계는 다시 작아진다.
+- **과제에 필요한 축**: 실제로 거의 안 쓰는 축은 그대로 두되, **반드시 써야 하는 축**은 데모마다 의도적으로 범위를 쓰도록 반복한다.
+- **다양성**: 같은 성공이라도 시작 자세·속도·경로가 다른 데모를 여러 개 둔다.
+
+#### 7-2) 데이터셋 구성·변환 (필터/가중)
+- **고변화 프레임 oversample**: `||delta_q||`가 큰 프레임을 변환 단계나 별도 스크립트에서 복제해 비율을 올린다. (분포를 바꾸므로 과하면 부작용 가능 — 점진 적용.)
+- **저모션 프레임 downsample**: 정지에 가까운 스텝 비율을 줄인다.
+- **에피소드 설계**: 짧고 “움직임 위주”인 클립을 늘려 전체에서 정지 비율을 낮춘다.
+
+#### 7-3) 액션 표현·제어 주기 (구조 변경 — 공수·효과 모두 큼)
+- **제어 Hz 정렬**: 학습만 낮은 Hz로 리샘플하거나 `q[t+k]-q[t]`처럼 스텝당 델타를 키운 뒤, ROS 추론 주기·궤적 시간과 맞춘다.
+- **절대 관절 목표 등**: 프레임 간 델타 대신 절대각을 액션으로 쓰면 잘게 쪼개진 델타 분포에 덜 민감할 수 있으나, `convert.py`·정책·`inference_node` 등 **파이프라인 전반** 수정이 필요하다.
+
+#### 7-4) 학습 쪽 튜닝 (보조)
+- **관절별 손실 가중**: 움직여야 하는 축에 더 큰 weight (LeRobot/ACT에서 지원 여부 확인 필요).
+- **정규화**: `std`가 지나치게 작은 축에 **최소 std floor** 등 — 이론상 가능하나 프레임워크 기본만으로는 까다로울 수 있어 우선순위는 낮게 둘 수 있음.
+
+#### 7-5) 검증 프로토콜
+- 새 데이터 도입 전·후에 동일 스크립트로 `per-step |dq|` 평균·분위수·“전 축 저모션 스텝 비율” 등을 찍어 **수치 목표**를 정한다 (예: 저모션 비율을 절반대에서 더 낮추기).
+
+#### 7-6) 권장 순서(검토용)
+1. 수집 습관·클립 설계 정비  
+2. `meta/stats.json` / NPZ 스크립트로 지표 목표 설정  
+3. 필요 시 oversample/downsample  
+4. 여전히 부족하면 액션 표현·제어 Hz 검토  
+
+#### 7-7) 추론 시 정규화 관련 (오해 방지)
+- LeRobot `predict_action`은 **관측 preprocessor → 정책 → action postprocessor(비정규화)** 순으로 동작하며, 체크포인트의 `policy_postprocessor`로 액션을 물리 단위로 되돌린다. “학습할 때만 정규화하고 추론에서 역변환을 안 한다”는 구조가 아니다. 작은 출력은 **데이터 분포·모델 예측** 쪽 원인과 함께 본다 (`lerobot.utils.control_utils.predict_action`, `pipet_inference/lerobot_act_backend.py` 참고).
+
+### 8) 관련 코드/문서 위치
+- 추론 노드: `ros2_ws/src/pipet_inference/pipet_inference/inference_node.py` (`JointTrajectory` 발행, 그리퍼 `Trigger` 호출).
+- 추론 런치: `ros2_ws/src/pipet_bringup/launch/inference.launch.py`.
+- NPZ 수집: `ros2_ws/src/pipet_data_collector/pipet_data_collector/data_collector_node.py` (`/joint_states`의 `position` 앞 6개를 저장).
+- 인터페이스 명세: `docs/interface_spec.md` (궤적 토픽·`indy_srv` 코드 등).
