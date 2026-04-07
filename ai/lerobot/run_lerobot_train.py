@@ -62,6 +62,18 @@ def main() -> None:
     )
 
     parser.add_argument("--skip_convert", action="store_true", help="Skip NPZ -> LeRobotDataset conversion.")
+    parser.add_argument(
+        "--drop_idle_sec",
+        type=float,
+        default=0.0,
+        help="Drop continuous idle segments longer than this many seconds during conversion (0 disables).",
+    )
+    parser.add_argument(
+        "--idle_joint_delta_thresh",
+        type=float,
+        default=1e-4,
+        help="Per-step joint delta threshold (rad) for idle detection during conversion.",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -91,6 +103,13 @@ def main() -> None:
             cmd_convert.append("--only_success")
         if args.image_resize_to:
             cmd_convert += ["--image_resize_to", args.image_resize_to]
+        if args.drop_idle_sec and args.drop_idle_sec > 0.0:
+            cmd_convert += [
+                "--drop_idle_sec",
+                str(args.drop_idle_sec),
+                "--idle_joint_delta_thresh",
+                str(args.idle_joint_delta_thresh),
+            ]
         run(cmd_convert)
 
     # 학습 단계: 로컬 데이터셋은 --dataset.root 로 전달한다.

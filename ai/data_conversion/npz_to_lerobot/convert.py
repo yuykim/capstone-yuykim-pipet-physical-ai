@@ -106,6 +106,53 @@ def _build_features(h: int, w: int) -> dict[str, dict[str, Any]]:
     }
 
 
+def _compute_idle_keep_mask(
+    joint_positions: np.ndarray,
+    gripper_actions: np.ndarray,
+    *,
+    min_idle_steps: int,
+    joint_delta_thresh: float,
+) -> np.ndarray:
+    """
+    transition 인덱스 t(0..N-2) 기준 keep mask를 만든다.
+
+    idle transition 정의:
+      - 팔: |q[t+1] - q[t]|의 모든 축이 joint_delta_thresh 미만
+      - 그리퍼: gripper_actions[t+1] == gripper_actions[t] (상태 변화 없음)
+
+    위 idle이 min_idle_steps 이상 연속된 구간은 통째로 drop한다.
+    """
+    n = int(joint_positions.shape[0])
+    m = max(0, n - 1)  # number of transitions / trainable steps
+    keep = np.ones((m,), dtype=bool)
+    if m == 0:
+        return keep
+
+    delta_q = joint_positions[1:] - joint_positions[:-1]  # (m,6)
+    arm_idle = np.max(np.abs(delta_q), axis=1) < float(joint_delta_thresh)
+    grip_idle = gripper_actions[1:m + 1] == gripper_actions[:m]
+    idle = arm_idle & grip_idle
+
+    if min_idle_steps <= 1:
+        keep[idle] = False
+        return keep
+
+    # 연속 idle run 중 길이가 min_idle_steps 이상인 구간만 drop
+    run_start = 0
+    while run_start < m:
+        if not idle[run_start]:
+            run_start += 1
+            continue
+        run_end = run_start
+        while run_end < m and idle[run_end]:
+            run_end += 1
+        run_len = run_end - run_start
+        if run_len >= min_idle_steps:
+            keep[run_start:run_end] = False
+        run_start = run_end
+    return keep
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--episodes_dir", required=True, help="Folder containing episodes/*.npz")
@@ -121,6 +168,18 @@ def main() -> None:
     )
     parser.add_argument("--max_episodes", type=int, default=0, help="0 means no limit.")
     parser.add_argument("--image_resize_to", type=str, default="", help="Optional HxW resize, e.g. 480x640.")
+    parser.add_argument(
+        "--drop_idle_sec",
+        type=float,
+        default=0.0,
+        help="Drop continuous idle segments longer than this many seconds. 0 disables.",
+    )
+    parser.add_argument(
+        "--idle_joint_delta_thresh",
+        type=float,
+        default=1e-4,
+        help="Per-step joint delta threshold (rad) for idle detection.",
+    )
     args = parser.parse_args()
 
     episodes_dir = Path(args.episodes_dir)
@@ -213,6 +272,7 @@ def main() -> None:
         return cv2.resize(img_hwc_u8, (rw, rh), interpolation=cv2.INTER_LINEAR)
 
     kept_episodes = 0
+    dropped_idle_frames_total = 0
     for i, ep_path in enumerate(episode_files):
         with np.load(ep_path) as ep:
             # success 라벨 키가 파이프라인에 따라 다를 수 있어 유연하게 처리한다.
@@ -239,9 +299,23 @@ def main() -> None:
         if n < 2:
             continue
 
+        # 기본은 전체 transition 유지
+        keep_mask = np.ones((n - 1,), dtype=bool)
+        if args.drop_idle_sec and args.drop_idle_sec > 0.0:
+            min_idle_steps = max(1, int(round(float(args.drop_idle_sec) * float(args.fps))))
+            keep_mask = _compute_idle_keep_mask(
+                joint_positions,
+                np.asarray(gripper_actions),
+                min_idle_steps=min_idle_steps,
+                joint_delta_thresh=float(args.idle_joint_delta_thresh),
+            )
+            dropped_idle_frames_total += int((~keep_mask).sum())
+
         # action은 (t -> t+1) 전이 기반이므로 마지막 timestep은 드랍한다.
         # 모방학습 데이터셋에서도 흔한 처리(마지막에 action이 없는 observation을 남기지 않음).
         for t in range(n - 1):
+            if not keep_mask[t]:
+                continue
             q_t = joint_positions[t]  # (6,)
             dq_t = joint_velocities[t]
             tau_t = joint_efforts[t]
@@ -276,6 +350,12 @@ def main() -> None:
     # 중요: finalize()가 parquet writer를 닫아 footer 메타데이터를 기록한다.
     # 이 호출이 없으면 데이터셋이 정상 로드되지 않는다.
     dataset.finalize()
+    if args.drop_idle_sec and args.drop_idle_sec > 0.0:
+        print(
+            f"Idle filter: drop_idle_sec={args.drop_idle_sec}, "
+            f"idle_joint_delta_thresh={args.idle_joint_delta_thresh}, "
+            f"dropped_transitions={dropped_idle_frames_total}"
+        )
     print(f"Done. Kept {kept_episodes} episodes -> {output_dir}")
 
 
