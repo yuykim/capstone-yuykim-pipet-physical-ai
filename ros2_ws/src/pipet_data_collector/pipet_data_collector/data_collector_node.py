@@ -104,6 +104,9 @@ class DataCollectorNode(Node):
         self.mark_fail_srv = self.create_service(
             Trigger, '/data_collector/mark_fail', self._mark_fail_callback
         )
+        self.discard_srv = self.create_service(
+            Trigger, '/data_collector/discard', self._discard_callback
+        )
 
         # Gripper status - separate subscriber (slow ~0.7Hz, not synced)
         self._latest_gripper_status = None
@@ -234,6 +237,14 @@ class DataCollectorNode(Node):
         self._episode_success = False
         response.success = True
         response.message = 'Episode marked as FAIL'
+        return response
+
+    def _discard_callback(self, request, response):
+        self.is_recording = False
+        self._clear_buffers()
+        response.success = True
+        response.message = 'Recording discarded'
+        self.get_logger().info(response.message)
         return response
 
     def _gripper_status_cb(self, msg: GripperStatus):
