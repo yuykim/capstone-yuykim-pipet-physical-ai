@@ -89,6 +89,7 @@ class SystemTeleopNode(Node):
         self.data_stop = self.create_client(Trigger, '/data_collector/stop')
         self.data_mark_success = self.create_client(Trigger, '/data_collector/mark_success')
         self.data_mark_fail = self.create_client(Trigger, '/data_collector/mark_fail')
+        self.data_discard = self.create_client(Trigger, '/data_collector/discard')
 
         # Service clients -- Data collector gripper action logging
         self.log_grasp = self.create_client(Trigger, '/data_collector/log_grasp')
@@ -200,26 +201,31 @@ class SystemTeleopNode(Node):
     def _handle_space(self):
         if self._is_recording:
             print('\nStopping recording...')
-            print('Result? [Y] Success / [N] Fail: ', end='', flush=True)
+            print('Result? [Y] Success / [N] Fail / [X] Discard: ', end='', flush=True)
             while True:
                 result_key = self.keyboard.read_one()
-                if result_key and result_key.upper() in ('Y', 'N'):
+                if result_key and result_key.upper() in ('Y', 'N', 'X'):
                     break
-            is_success = result_key.upper() == 'Y'
-            if is_success:
-                self._call_trigger(self.data_mark_success)
-                print('SUCCESS')
+            choice = result_key.upper()
+            if choice == 'X':
+                print('DISCARD')
+                self._call_trigger(self.data_discard)
+                print('Recording discarded.\n')
             else:
-                self._call_trigger(self.data_mark_fail)
-                print('FAIL')
-            print('Saving data (this may take a moment)...')
-            req = Trigger.Request()
-            future = self.data_stop.call_async(req)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=120.0)
-            if future.result() is not None and future.result().success:
-                print(f'{future.result().message}\n')
-            else:
-                print('Failed to stop recording.\n')
+                if choice == 'Y':
+                    self._call_trigger(self.data_mark_success)
+                    print('SUCCESS')
+                else:
+                    self._call_trigger(self.data_mark_fail)
+                    print('FAIL')
+                print('Saving data (this may take a moment)...')
+                req = Trigger.Request()
+                future = self.data_stop.call_async(req)
+                rclpy.spin_until_future_complete(self, future, timeout_sec=120.0)
+                if future.result() is not None and future.result().success:
+                    print(f'{future.result().message}\n')
+                else:
+                    print('Failed to stop recording.\n')
         else:
             print('\nStarting recording...')
             if self._call_trigger(self.data_start):
