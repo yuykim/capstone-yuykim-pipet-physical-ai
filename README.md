@@ -28,6 +28,36 @@ Indy7 로봇팔 + Mark7 로봇손 + RealSense D435(손목/오버헤드) 2대를 
 
 데이터 수집은 ROS2에서 수행하고, 결과는 `episodes/episode_*.npz`로 저장된다.
 
+### 2-0. 네트워크 설정 (최초 1회)
+
+Indy7(IP: `192.168.1.10`)과 통신하려면 PC에 같은 대역의 IP를 설정해야 한다.
+
+**방법 A: USB 이더넷 어댑터 직접 연결 (권장)**
+```bash
+# 영구 설정 (재부팅 후에도 유지)
+sudo nmcli con mod enx00e04c360046 ipv4.addresses 192.168.1.100/24 ipv4.method manual
+sudo nmcli con up enx00e04c360046
+
+# 확인
+ping 192.168.1.10
+```
+
+**방법 B: 공유기 경유 연결**
+
+로봇과 PC를 같은 공유기에 연결한 후, PC 내장 이더넷에 로봇 대역 IP를 추가한다.
+```bash
+# 임시 설정 (재부팅 시 사라짐)
+sudo ip addr add 192.168.1.100/24 dev enp0s31f6
+
+# 영구 설정
+sudo nmcli con mod enp0s31f6 +ipv4.addresses 192.168.1.100/24
+
+# 확인
+ping 192.168.1.10
+```
+
+> **트러블슈팅:** ping 실패 → ① 로봇 컨트롤러 전원 확인 ② 케이블 확인 ③ `ip addr show`에서 IP 할당 확인. gRPC 포트 실패(`nc -zv 192.168.1.10 20001`) → 컨트롤러 재부팅 후 2~3분 대기.
+
 ### 2-1. 빌드
 ```bash
 cd <repo_root>
