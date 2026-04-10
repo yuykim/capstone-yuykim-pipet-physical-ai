@@ -35,6 +35,12 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 import message_filters
 
+from indy_interfaces.srv import IndyService
+
+# Neuromeka indy_driver: joint_trajectory_callback은 이 모드일 때만 movetelej_abs 호출
+# (indy_define.MSG_TELE_JOINT_ABS — 포크마다 숫자가 다를 수 있어 파라미터로 덮어쓸 수 있음)
+_DEFAULT_MSG_TELE_JOINT_ABS = 6
+
 from pipet_inference.lerobot_act_backend import (
     LeRobotActBackend,
     read_dataset_root_from_train_config,
@@ -73,10 +79,18 @@ class InferenceNode(Node):
         self.declare_parameter("trajectory_topic", "/joint_trajectory_controller/joint_trajectory")
         self.declare_parameter("trajectory_horizon_sec", 0.12)
         self.declare_parameter("max_delta_rad", 0.25)
+        self.declare_parameter(
+            "action_delta_scale",
+            1.0,
+        )
+        self.declare_parameter("image_target_height", 0)
+        self.declare_parameter("image_target_width", 0)
         self.declare_parameter("dry_run", False)
         self.declare_parameter("autonomy_enabled", False)
         self.declare_parameter("use_zmq_sidecar", True)
         self.declare_parameter("zmq_endpoint", "tcp://127.0.0.1:5560")
+        self.declare_parameter("indy_prep_joint_teleop", True)
+        self.declare_parameter("indy_prep_joint_teleop_code", _DEFAULT_MSG_TELE_JOINT_ABS)
 
         model_path = self.get_parameter("model_path").get_parameter_value().string_value
         model_type = self.get_parameter("model_type").get_parameter_value().string_value
@@ -89,6 +103,26 @@ class InferenceNode(Node):
         trajectory_topic = self.get_parameter("trajectory_topic").get_parameter_value().string_value
         traj_sec = self.get_parameter("trajectory_horizon_sec").get_parameter_value().double_value
         self._max_delta = float(self.get_parameter("max_delta_rad").get_parameter_value().double_value)
+        self._action_delta_scale = float(
+            self.get_parameter("action_delta_scale").get_parameter_value().double_value
+        )
+        if self._action_delta_scale <= 0.0:
+            self.get_logger().warn("action_delta_scale<=0 이므로 1.0으로 대체합니다.")
+            self._action_delta_scale = 1.0
+        img_th = int(self.get_parameter("image_target_height").get_parameter_value().integer_value)
+        img_tw = int(self.get_parameter("image_target_width").get_parameter_value().integer_value)
+        self._img_resize_hw: Optional[tuple[int, int]] = None
+        self._cv2_resize = None
+        if img_th > 0 and img_tw > 0:
+            self._img_resize_hw = (img_th, img_tw)
+            try:
+                import cv2
+
+                self._cv2_resize = cv2
+            except ImportError:
+                self.get_logger().error(
+                    "image_target_height/width가 설정됐지만 OpenCV(cv2)가 없어 리사이즈를 건너뜁니다."
+                )
         self._dry_run = bool(self.get_parameter("dry_run").get_parameter_value().bool_value)
         self._autonomy_enabled = bool(self.get_parameter("autonomy_enabled").get_parameter_value().bool_value)
         use_zmq = bool(self.get_parameter("use_zmq_sidecar").get_parameter_value().bool_value)
@@ -101,6 +135,15 @@ class InferenceNode(Node):
         self._latest_obs: Optional[dict[str, np.ndarray]] = None
         self._last_grip_cmd: Optional[int] = None
         self._tick_count = 0
+        self._indy_prep_done = False
+        self._indy_prep_pending = False
+        self._indy_prep_joint_teleop = bool(
+            self.get_parameter("indy_prep_joint_teleop").get_parameter_value().bool_value
+        )
+        self._indy_prep_code = int(
+            self.get_parameter("indy_prep_joint_teleop_code").get_parameter_value().integer_value
+        )
+        self._indy_srv = self.create_client(IndyService, "indy_srv")
 
         if model_type != "lerobot":
             self.get_logger().error(f"지원하지 않는 model_type={model_type} (lerobot 만 지원).")
@@ -180,10 +223,21 @@ class InferenceNode(Node):
         period = 1.0 / max(1.0, inference_hz)
         self.create_timer(period, self._inference_tick)
 
+        extra = f"action_delta_scale={self._action_delta_scale}"
+        if self._img_resize_hw is not None:
+            extra += f" | image_resize={self._img_resize_hw[0]}x{self._img_resize_hw[1]}"
         self.get_logger().info(
             f"추론 {inference_hz}Hz | zmq={use_zmq} | autonomy_enabled={self._autonomy_enabled} | "
-            f"dry_run={self._dry_run} | trajectory_topic={trajectory_topic}"
+            f"dry_run={self._dry_run} | trajectory_topic={trajectory_topic} | {extra}"
         )
+
+    def _resize_rgb_if_needed(self, img: np.ndarray) -> np.ndarray:
+        if self._img_resize_hw is None or self._cv2_resize is None:
+            return img
+        th, tw = self._img_resize_hw
+        if img.shape[0] == th and img.shape[1] == tw:
+            return img
+        return self._cv2_resize.resize(img, (tw, th), interpolation=self._cv2_resize.INTER_AREA)
 
     def _sync_callback(self, joint_msg: JointState, wrist_rgb_msg: Image, overhead_rgb_msg: Image) -> None:
         if len(joint_msg.name) >= 6:
@@ -197,6 +251,9 @@ class InferenceNode(Node):
         except Exception as e:
             self.get_logger().error(f"이미지 변환 실패: {e}")
             return
+
+        wrist_rgb = self._resize_rgb_if_needed(wrist_rgb)
+        overhead_rgb = self._resize_rgb_if_needed(overhead_rgb)
 
         q = np.array(_joint_vec_to_six(joint_msg.position), dtype=np.float32)
         dq = np.array(_joint_vec_to_six(joint_msg.velocity), dtype=np.float32)
@@ -230,19 +287,53 @@ class InferenceNode(Node):
             self.get_logger().warn(f"액션 차원 부족: {action.shape}")
             return
 
-        delta = np.clip(action[:6], -self._max_delta, self._max_delta)
+        raw6 = action[:6].astype(np.float64) * self._action_delta_scale
+        delta = np.clip(raw6, -self._max_delta, self._max_delta)
         g_raw = float(action[6])
         g_cmd = int(np.clip(np.round(g_raw), 0, 4))
 
         q_now = obs["observation.state"][:6].astype(np.float64)
-        q_tgt = q_now + delta.astype(np.float64)
+        q_tgt = q_now + delta
 
         if self._tick_count % 40 == 0:
             self.get_logger().info(
-                f"delta_norm={float(np.linalg.norm(delta)):.4f} grip_cmd={g_cmd} autonomy={self._autonomy_enabled}"
+                f"delta_norm={float(np.linalg.norm(delta)):.4f} "
+                f"(scale={self._action_delta_scale}) grip_cmd={g_cmd} autonomy={self._autonomy_enabled}"
             )
 
         if self._dry_run or not self._autonomy_enabled:
+            return
+
+        if self._indy_prep_joint_teleop and not self._indy_prep_done:
+            if self._indy_prep_pending:
+                return
+            if not self._indy_srv.wait_for_service(timeout_sec=0.0):
+                if self._tick_count % 40 == 0:
+                    self.get_logger().warn("indy_srv 대기 중 — 팔 명령은 서비스 준비 후 전송됩니다.")
+                return
+            self._indy_prep_pending = True
+            req = IndyService.Request()
+            req.data = self._indy_prep_code
+            fut = self._indy_srv.call_async(req)
+
+            def _on_prep_done(f) -> None:
+                try:
+                    r = f.result()
+                    if r.success:
+                        self._indy_prep_done = True
+                        self.get_logger().info(
+                            f"Indy 관절 텔레옵 준비 완료 (indy_srv data={self._indy_prep_code})."
+                        )
+                    else:
+                        self.get_logger().error(
+                            f"indy_srv 준비 실패: {r.message} (data={self._indy_prep_code})"
+                        )
+                except Exception as ex:
+                    self.get_logger().error(f"indy_srv 호출 예외: {ex}")
+                finally:
+                    self._indy_prep_pending = False
+
+            fut.add_done_callback(_on_prep_done)
             return
 
         self._publish_joint_targets(q_tgt)

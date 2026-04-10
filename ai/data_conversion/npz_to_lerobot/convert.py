@@ -71,6 +71,24 @@ def _derive_fps_from_timestamps(timestamps: np.ndarray) -> int:
     return max(1, fps)
 
 
+def _ensure_joint_matrix_n6(arr: np.ndarray, name: str) -> np.ndarray:
+    """Indy7 6축 기준으로 joint 행렬을 보정한다."""
+    a = np.asarray(arr, dtype=np.float32)
+    if a.ndim != 2:
+        raise ValueError(f"{name} expected 2D array, got shape {a.shape}")
+    n = a.shape[0]
+    c = a.shape[1]
+    if c == 6:
+        return a
+    if c == 0:
+        return np.zeros((n, 6), dtype=np.float32)
+    if c > 6:
+        return a[:, :6].astype(np.float32)
+    out = np.zeros((n, 6), dtype=np.float32)
+    out[:, :c] = a
+    return out
+
+
 def _build_features(h: int, w: int) -> dict[str, dict[str, Any]]:
     # LeRobot의 dataset feature spec에서 이미지 shape는 (H, W, C)로 정의한다.
     # 실제 프레임 값은 HWC/CHW 모두 받아들이지만, 우리는 NPZ가 HWC이므로 그대로 사용한다.
@@ -200,15 +218,9 @@ def main() -> None:
     with np.load(episode_files[0]) as ep0:
         wrist_rgb0 = ep0["wrist_rgb_images"]
         overhead_rgb0 = ep0["overhead_rgb_images"]
-        q0 = ep0["joint_positions"]
-        dq0 = ep0["joint_velocities"]
-        tau0 = ep0["joint_efforts"]
-
-        if q0.shape[1] != 6 or dq0.shape[1] != 6 or tau0.shape[1] != 6:
-            raise ValueError(
-                f"Expected joint_* arrays with shape (N, 6), got: "
-                f"joint_positions={q0.shape}, joint_velocities={dq0.shape}, joint_efforts={tau0.shape}"
-            )
+        q0 = _ensure_joint_matrix_n6(ep0["joint_positions"], "joint_positions")
+        dq0 = _ensure_joint_matrix_n6(ep0["joint_velocities"], "joint_velocities")
+        tau0 = _ensure_joint_matrix_n6(ep0["joint_efforts"], "joint_efforts")
 
         # wrist_rgb_images: (N, H, W, 3)
         if wrist_rgb0.ndim != 4 or wrist_rgb0.shape[-1] != 3:
@@ -249,7 +261,6 @@ def main() -> None:
     features = _build_features(h=h, w=w)
 
     output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     # 로컬 파일시스템에 새 LeRobotDataset을 생성한다.
     # 여기서 `repo_id`는 meta/info.json에 저장되는 식별자일 뿐이며, HF Hub로 push하지 않는다.
@@ -288,9 +299,9 @@ def main() -> None:
             if args.only_success and success_val is not None and not success_val:
                 continue
 
-            joint_positions = ep["joint_positions"].astype(np.float32)
-            joint_velocities = ep["joint_velocities"].astype(np.float32)
-            joint_efforts = ep["joint_efforts"].astype(np.float32)
+            joint_positions = _ensure_joint_matrix_n6(ep["joint_positions"], "joint_positions")
+            joint_velocities = _ensure_joint_matrix_n6(ep["joint_velocities"], "joint_velocities")
+            joint_efforts = _ensure_joint_matrix_n6(ep["joint_efforts"], "joint_efforts")
             wrist_rgb_images = ep["wrist_rgb_images"].astype(np.uint8)
             overhead_rgb_images = ep["overhead_rgb_images"].astype(np.uint8)
             gripper_actions = ep["gripper_actions"]

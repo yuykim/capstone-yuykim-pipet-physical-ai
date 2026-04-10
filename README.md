@@ -96,11 +96,12 @@ python ai/data_conversion/npz_to_lerobot/convert.py \
 ```bash
 python ai/lerobot/run_lerobot_train.py \
   --episodes_dir <episodes_dir> \
-  --dataset_output_dir <lerobot_dataset_dir> \
+  --dataset_output_dir ai/datasets/<lerobot_dataset_name> \
   --dataset_repo_id pipet_dataset \
-  --output_dir outputs/train/act_pipet \
+  --job_name act_pipet \
   --device cuda
 ```
+(`--output_dir`를 생략하면 `ai/models/<job_name>`에 체크포인트가 저장된다.)
 
 `--skip_convert`를 주면 기존 변환 데이터셋으로 학습만 수행할 수 있다.
 

@@ -38,6 +38,45 @@ ping -c 2 192.168.1.10
 ```
 - 위 절차 이후 `ping 192.168.1.10`가 성공(패킷 수신 2/2)하여 로봇 연결 네트워크 설정 문제가 해결됨.
 
+### 4) 재발(26.04.10): 허브 교체 -> `ping 192.168.1.10` 실패 — USB 동글 교체·인터페이스 이름 변경
+
+**증상:** 이전에 성공했던 `indy7-static` 설정이 있는데도 `ping 192.168.1.10`이 100% loss.
+
+**원인(해당 PC 기준으로 확인):**
+- USB 이더넷 동글의 **udev 인터페이스 이름**은 MAC 주소 기반이라, **동글을 바꾸면 `enx...` 이름이 바뀜** (예: 예전 문서의 `enx00e04c360046` → 현재 `enx00e04cae0a69`).
+- `nmcli con show indy7-static`에 `connection.interface-name: enx00e04c360046`로 남아 있으면, **실제로는 존재하지 않는 인터페이스**에만 연결을 올리려 해서 **고정 IP(192.168.1.100/24)가 새 동글에 안 붙음**.
+- 동일 이름 `indy7-static` 프로필이 **UUID가 다른 복수 개** 남아 있으면 정리가 필요할 수 있음.
+
+**진단:**
+```bash
+ip -br link | grep enx
+ip addr show enxXXXXXXXXXXXX   # 위에서 확인한 실제 이름으로
+nmcli -t -f NAME,UUID,DEVICE con show | grep indy7
+nmcli con show indy7-static | grep connection.interface-name
+ping -c 2 -W 2 192.168.1.10
+```
+
+**해결(관리자 권한):** 실제 USB 이더넷 이름을 `<INDY_IF>`로 바꿔 실행.
+
+```bash
+# (선택) 중복 indy7-static 중 오래된 것 삭제 — UUID는 nmcli 출력으로 확인
+# sudo nmcli con delete <불필요한_UUID>
+
+# 기존 indy7-static이 있으면 인터페이스만 현재 동글로 교체
+sudo nmcli con mod indy7-static connection.interface-name <INDY_IF>
+sudo nmcli con up indy7-static
+
+# 또는 새로 만들기(이름 충돌 시 기존 indy7-static 이름 변경/삭제 후)
+# sudo nmcli con add type ethernet ifname <INDY_IF> con-name indy7-static \
+#   ipv4.addresses 192.168.1.100/24 ipv4.method manual ipv6.method ignore autoconnect yes
+# sudo nmcli con up indy7-static
+
+ip addr show <INDY_IF> | grep inet   # -> 192.168.1.100/24
+ping -c 2 192.168.1.10
+```
+
+**참고:** `CLAUDE.md` 등 문서에 적힌 `enx00e04c360046`는 **당시 동글 MAC 기준 이름**이므로, 장비가 바뀌면 **`ip -br link`로 매번 확인**하는 것이 안전함.
+
 ---
 
 ## 빌드 과정 중 문제와 해결 방법(colcon build)
@@ -233,7 +272,7 @@ ros2 topic info /joint_trajectory_controller/joint_trajectory -v
 - `/joint_states`와 궤적의 **`joint_names` 순서·이름**이 Indy 6축과 일치하는지 `ros2 topic echo`로 교차 확인.
 - 정책과 무관하게 드라이버만 검증하려면, `JointTrajectory`를 수동 `ros2 topic pub` 등으로 소량 발행해 반응 여부를 분리 진단 가능.
 
-### 4) 학습 데이터 통계(`ai/training_data/meta/stats.json`)와 액션 정의
+### 4) 학습 데이터 통계(`ai/datasets/<dataset>/meta/stats.json`)와 액션 정의
 - NPZ→LeRobot 변환(`ai/data_conversion/npz_to_lerobot/convert.py`)에서 액션은
   **`action = [delta_q (6), gripper_action]`**, `delta_q[t] = joint_positions[t+1] - joint_positions[t]` (20Hz 인접 프레임 차이).
 - 동일 루트의 `stats.json`에서 `action`의 `delta_q` 차원은 **스텝당 변화가 대부분 매우 작은 분포**로 나타남(평균·분위수 기준).
@@ -327,3 +366,63 @@ print("fraction all joints |dq|<1e-4:", (np.abs(dq) < 1e-4).all(axis=1).mean())
 주의:
 - 위 값은 `python ai/lerobot/run_lerobot_train.py ...` 래퍼 경로에서 자동 적용된다.
 - 체크포인트 구조(`chunk_size` 등)가 바뀌므로 기존 100-step 설정 모델과는 호환되지 않을 수 있어, 새 설정으로는 재학습을 전제로 한다.
+
+---
+
+## 26.04.10 추론(Indy7+Mark7+RealSense) 트러블슈팅 및 운영 정리
+
+### 1) `autonomy_enabled:=true`인데 Indy7 팔이 전혀 움직이지 않음
+
+**증상:** `inference_node` 로그에 `delta_norm`, `grip_cmd`는 찍히는데 로봇 팔은 반응 없음. Mark7·카메라는 정상인 것처럼 보임.
+
+**원인:** Neuromeka `indy_driver`의 `joint_trajectory_callback`은 내부 상태가 **`MSG_TELE_JOINT_ABS`(관절 절대 텔레옵)** 일 때만 `movetelej_abs`로 궤적을 반영한다. 데이터 수집 후 **직접 교시(다른 `indy_srv` 모드)** 가 켜진 채로 두면 `/joint_trajectory_controller/joint_trajectory`를 발행해도 **드라이버가 무시**한다.
+
+**해결(코드 반영):** `pipet_inference`의 `inference_node`가 자율 모드에서 추론 전에 `indy_srv`로 `data=6`(기본, `indy_define.MSG_TELE_JOINT_ABS`)를 한 번 호출하도록 했다. 런치 인자 `indy_prep_joint_teleop`(기본 true), `indy_prep_joint_teleop_code`(포크마다 다를 수 있음)로 조절.
+
+**확인 로그:** `Indy 관절 텔레옵 준비 완료 (indy_srv data=6).` 이후 팔 명령이 나가야 한다.
+
+### 2) 팔은 움직이는데 너무 느리거나 `delta_norm`이 ~0.001 수준
+
+**원인 후보:**
+- 학습 데이터·전처리와 불일치: 예) `act_360_idle`은 **360×480** 이미지인데 추론은 RealSense **640×480**을 그대로 넣으면 정책 출력이 작게 나올 수 있음.
+- idle 위주 데이터면 스텝당 `delta_q` 분포 자체가 작음.
+
+**해결(코드 반영):** `inference_node`에 **`action_delta_scale`**(모델 6D 델타에 곱한 뒤 `max_delta_rad`로 클립), **`image_target_height` / `image_target_width`**(0이면 미리사이즈 없음) 추가. 런치에서 예: `action_delta_scale:=8.0`, `image_target_height:=360`, `image_target_width:=480`.
+
+### 3) ZMQ 사이드카·실행 순서
+
+- ROS Humble(Python 3.10)과 LeRobot(Python 3.12+) 분리를 위해 **터미널 A:** `python -m pipet_inference.zmq_act_server --model-path .../checkpoints/...`  
+- **터미널 B:** `ros2 launch pipet_bringup inference.launch.py ...`  
+- `model_path`는 A의 `--model-path`와 **동일**해야 한다. `checkpoints/last` 대신 **`020000` 등 특정 스텝 폴더**를 쓰려면 양쪽 모두 그 경로로 통일.
+
+### 4) NetworkManager: 문서의 `<INDY_IF>`는 치환 표기
+
+- 셸에서 `sudo nmcli con mod indy7-static connection.interface-name <enx...>`처럼 **꺾쇠를 그대로 입력하면** 리다이렉션으로 `syntax error`가 난다. **꺾쇠 없이** 실제 인터페이스 이름만 넣는다 (예: `enx00e04cae0a69`).
+
+### 5) `ai/` 디렉터리 정리 (26.04.10)
+
+**목적:** 학습용 LeRobot 데이터셋, 학습 산출물(체크포인트), 학습 로그를 역할별로 분리.
+
+| 경로 | 내용 |
+|------|------|
+| `ai/datasets/` | 변환된 LeRobotDataset (`training_data`, `training_data_360_idle_v3` 등) |
+| `ai/models/` | 학습 런별 체크포인트 (예: `act/`, `act_360_idle/` — 기존 `pipet_train_outputs` 대체) |
+| `ai/logs/` | `trainlog.md` 등 (기존 `ai/log/` 이동) |
+
+- 기존 체크포인트 내 `train_config.json` 등의 **절대 경로**는 `models/`, `datasets/`에 맞게 일괄 갱신해 두었음(추론 시 `dataset.root` 자동 로드 유지).
+- `.gitignore`: `ai/models/`, `ai/datasets/` 무시. 루트 `logs` 패턴이 `ai/logs`까지 막지 않도록 **`/logs/`** 로 한정.
+- `inference.launch.py` 기본 `model_path`: `.../ai/models/act/checkpoints/last`.
+- `run_lerobot_train.py`: `--output_dir` 생략 시 **`ai/models/<job_name>`**; `--steps` 기본 `20000`; `--save_freq` 있으면 `lerobot-train`에 전달.
+
+### 6) Ctrl+C 시 `grip_preset_node` exit -2 / Traceback
+
+- **SIGINT**로 스핀 중인 노드가 종료될 때 흔히 나오는 현상. `launch`에서 exit code -2를 비정상으로 찍을 수 있으나, **의도적 중단**이면 무시해도 됨.
+
+---
+
+## 현재까지 요약 (26.04.10 기준)
+
+- **네트워크:** Indy용 USB 이더넷은 동글·MAC에 따라 `enx...` 이름이 바뀌므로 `indy7-static`의 `connection.interface-name`을 실제 인터페이스에 맞출 것.
+- **추론:** ZMQ 서버 선기동 → `inference.launch.py`; 팔 명령은 **`indy_srv`로 관절 절대 텔레옵(기본 code 6)** 준비 후 궤적 토픽이 먹힘.
+- **체감 속도/델타:** `action_delta_scale`·360×480 리사이즈 옵션으로 튜닝; 안전 거리·E-stop 유지.
+- **데이터/모델 경로:** `ai/datasets/`, `ai/models/`, `ai/logs/` 구조로 통일; 문서·런치·래퍼 기본값 반영됨.

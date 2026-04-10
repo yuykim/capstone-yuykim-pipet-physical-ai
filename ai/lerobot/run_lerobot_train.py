@@ -13,7 +13,9 @@
 권장 워크플로우:
   1) ROS2 수집기로 `episodes/*.npz`를 만든다.
   2) NPZ를 LeRobotDataset v3.0 폴더로 변환한다( meta/info.json, meta/stats.json 생성 ).
+     출력은 `ai/datasets/<이름>/` 권장.
   3) `lerobot-train` 실행 시 `--dataset.root`에 위 폴더 경로를 넣어 학습한다.
+     `--output_dir` 생략 시 체크포인트는 `ai/models/<job_name>/` 에 저장된다.
 
 기본 학습 하이퍼파라미터(ACT):
   - `policy.chunk_size` / `policy.n_action_steps`: 40
@@ -49,10 +51,20 @@ def main() -> None:
     parser.add_argument("--task", default="Pick up the pipette")
     parser.add_argument("--only_success", action="store_true")
 
-    parser.add_argument("--output_dir", default="outputs/train/act_pipet")
+    parser.add_argument(
+        "--output_dir",
+        default="",
+        help="비우면 ai/models/<job_name> (절대 경로 권장)",
+    )
     parser.add_argument("--job_name", default="act_pipet")
-    parser.add_argument("--steps", type=int, default=50_000)
+    parser.add_argument("--steps", type=int, default=20_000)
     parser.add_argument("--eval_freq", type=int, default=10_000)
+    parser.add_argument(
+        "--save_freq",
+        type=int,
+        default=None,
+        help="체크포인트 저장 주기(미지정 시 lerobot 기본 20000). steps=20000이면 10000으로 두면 10k/20k에 저장.",
+    )
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
@@ -77,6 +89,9 @@ def main() -> None:
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
+    output_dir = args.output_dir.strip()
+    if not output_dir:
+        output_dir = str((repo_root / "models" / args.job_name).resolve())
     convert_py = repo_root / "data_conversion" / "npz_to_lerobot" / "convert.py"
 
     if not args.skip_convert:
@@ -109,6 +124,7 @@ def main() -> None:
                 str(args.drop_idle_sec),
                 "--idle_joint_delta_thresh",
                 str(args.idle_joint_delta_thresh),
+                
             ]
         run(cmd_convert)
 
@@ -127,7 +143,7 @@ def main() -> None:
         "--policy.device",
         args.device,
         "--output_dir",
-        args.output_dir,
+        output_dir,
         "--job_name",
         args.job_name,
         "--batch_size",
@@ -147,6 +163,8 @@ def main() -> None:
         "--dataset.use_imagenet_stats",
         "true",
     ]
+    if args.save_freq is not None:
+        cmd_train += ["--save_freq", str(args.save_freq)]
 
     run(cmd_train)
 

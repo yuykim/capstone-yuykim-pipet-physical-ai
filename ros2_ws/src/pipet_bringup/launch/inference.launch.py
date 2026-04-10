@@ -16,6 +16,9 @@ ROS Humble = Python 3.10, LeRobot conda = 3.12+ 이므로 추론은 별도 프�
     export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
     ros2 launch pipet_bringup inference.launch.py indy_ip:=192.168.1.10 autonomy_enabled:=true
 
+  neuromeka indy_driver는 joint_trajectory 토픽을 처리하려면 MSG_TELE_JOINT_ABS(기본 data=6) 텔레옵 모드여야 함.
+  inference_node가 indy_prep_joint_teleop:=true(기본)일 때 자동으로 indy_srv를 호출한다.
+
 기본 autonomy_enabled:=false. grip_preset / inference_node 가 Ctrl+C 시 exit code -2 는 SIGINT 로 정상.
 """
 
@@ -40,7 +43,7 @@ def generate_launch_description():
 
     model_path_arg = DeclareLaunchArgument(
         "model_path",
-        default_value="/home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai/ai/pipet_train_outputs/act/checkpoints/last",
+        default_value="/home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai/ai/models/act/checkpoints/last",
         description="checkpoints/last 또는 .../pretrained_model 절대 경로",
     )
     dataset_root_arg = DeclareLaunchArgument(
@@ -73,6 +76,31 @@ def generate_launch_description():
         "zmq_endpoint",
         default_value="tcp://127.0.0.1:5560",
         description="inference_node ↔ zmq_act_server",
+    )
+    indy_prep_joint_teleop_arg = DeclareLaunchArgument(
+        "indy_prep_joint_teleop",
+        default_value="true",
+        description="indy_srv로 MSG_TELE_JOINT_ABS 전환 후 trajectory 토픽이 동작(neuromeka indy_driver)",
+    )
+    indy_prep_joint_teleop_code_arg = DeclareLaunchArgument(
+        "indy_prep_joint_teleop_code",
+        default_value="6",
+        description="indy_define.MSG_TELE_JOINT_ABS (드라이버 포크면 indy_define.py 확인)",
+    )
+    action_delta_scale_arg = DeclareLaunchArgument(
+        "action_delta_scale",
+        default_value="1.0",
+        description="모델 관절 델타(6)에 곱함 — 출력이 너무 작으면 5~15 등으로 조절(안전·max_delta_rad와 함께 튜닝)",
+    )
+    image_target_height_arg = DeclareLaunchArgument(
+        "image_target_height",
+        default_value="0",
+        description="0이면 리사이즈 안 함. act_360_idle 등 360 학습이면 360",
+    )
+    image_target_width_arg = DeclareLaunchArgument(
+        "image_target_width",
+        default_value="0",
+        description="0이면 리사이즈 안 함. 360 학습이면 480",
     )
 
     indy_driver_launch = IncludeLaunchDescription(
@@ -182,6 +210,19 @@ def generate_launch_description():
                     LaunchConfiguration("use_zmq_sidecar"), value_type=bool
                 ),
                 "zmq_endpoint": LaunchConfiguration("zmq_endpoint"),
+                "indy_prep_joint_teleop": ParameterValue(
+                    LaunchConfiguration("indy_prep_joint_teleop"), value_type=bool
+                ),
+                "indy_prep_joint_teleop_code": ParameterValue(
+                    LaunchConfiguration("indy_prep_joint_teleop_code"), value_type=int
+                ),
+                "action_delta_scale": LaunchConfiguration("action_delta_scale"),
+                "image_target_height": ParameterValue(
+                    LaunchConfiguration("image_target_height"), value_type=int
+                ),
+                "image_target_width": ParameterValue(
+                    LaunchConfiguration("image_target_width"), value_type=int
+                ),
             }
         ],
     )
@@ -204,6 +245,11 @@ def generate_launch_description():
             autonomy_enabled_arg,
             use_zmq_sidecar_arg,
             zmq_endpoint_arg,
+            indy_prep_joint_teleop_arg,
+            indy_prep_joint_teleop_code_arg,
+            action_delta_scale_arg,
+            image_target_height_arg,
+            image_target_width_arg,
             indy_driver_launch,
             mark7_driver_launch,
             grip_preset_node,
