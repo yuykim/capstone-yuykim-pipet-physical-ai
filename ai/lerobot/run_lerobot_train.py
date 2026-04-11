@@ -60,12 +60,24 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=20_000)
     parser.add_argument("--eval_freq", type=int, default=10_000)
     parser.add_argument(
+        "--log_freq",
+        type=int,
+        default=50,
+        help="N 스텝마다 콘솔에 loss/lr/grad_norm 등 로그(LeRobot train_tracker). 기본 50.",
+    )
+    parser.add_argument(
         "--save_freq",
         type=int,
         default=None,
         help="체크포인트 저장 주기(미지정 시 lerobot 기본 20000). steps=20000이면 10000으로 두면 10k/20k에 저장.",
     )
     parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=None,
+        help="DataLoader worker 수. 미지정 시 lerobot 기본(4). 스트리밍+고해상도 이미지는 0이 안전(OOM·worker Killed 방지).",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--image_resize_to",
@@ -74,6 +86,11 @@ def main() -> None:
     )
 
     parser.add_argument("--skip_convert", action="store_true", help="Skip NPZ -> LeRobotDataset conversion.")
+    parser.add_argument(
+        "--dataset_streaming",
+        action="store_true",
+        help="Pass --dataset.streaming true (IterableDataset). 로컬 parquet 재구성 캐시로 ~/.cache 가 가득 찰 때 유리.",
+    )
     parser.add_argument(
         "--drop_idle_sec",
         type=float,
@@ -152,6 +169,8 @@ def main() -> None:
         str(args.steps),
         "--eval_freq",
         str(args.eval_freq),
+        "--log_freq",
+        str(args.log_freq),
         "--policy.chunk_size",
         "40",
         "--policy.n_action_steps",
@@ -165,6 +184,10 @@ def main() -> None:
     ]
     if args.save_freq is not None:
         cmd_train += ["--save_freq", str(args.save_freq)]
+    if args.dataset_streaming:
+        cmd_train += ["--dataset.streaming", "true"]
+    if args.num_workers is not None:
+        cmd_train += ["--num_workers", str(args.num_workers)]
 
     run(cmd_train)
 
