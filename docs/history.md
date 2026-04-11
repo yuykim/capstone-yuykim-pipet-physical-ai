@@ -369,6 +369,61 @@ print("fraction all joints |dq|<1e-4:", (np.abs(dq) < 1e-4).all(axis=1).mean())
 
 ---
 
+## 26.04.07 데이터 변환·학습 파이프라인 트러블슈팅 (26.04.11 정리)
+
+`ros2_ws/episodes/success/26.04.07` NPZ → `ai/data_conversion/npz_to_lerobot/convert.py` → `ai/datasets/26.04.07`(LeRobot v3), 학습은 `ai/lerobot/train_26_04_07.sh` → `ai/models/26.04.07`(10만 스텝, 1만 스텝마다 저장)까지 진행하면서 겪은 이슈와 대응을 정리한다.
+
+### 1) 변환·실행 환경
+
+- **conda `lerobot` 환경**에서 실행하고, `PYTHONPATH`에 `ai/lerobot_source/lerobot/src`를 넣어야 `lerobot`·`lerobot-train`이 프로젝트 벤더 소스와 맞는다.
+- 변환 시 `meta/info.json`의 `repo_id`는 `--output_repo_id`(예: `pipet_26_04_07`)와 맞춘다. 학습 시 `--dataset.repo_id`도 동일해야 한다.
+- `LeRobotDataset.create()`는 출력 루트 디렉터리가 **이미 존재하면** 실패할 수 있으므로, 재변환 시 해당 폴더를 비우거나 다른 경로를 쓴다.
+
+### 2) 학습 출력 디렉터리: `FileExistsError`
+
+**증상:** `Output directory ... already exists and resume is False`.
+
+**원인:** LeRobot은 `resume=False`일 때 기존 `output_dir`가 디렉터리로 있으면 덮어쓰기를 막는다. 스크립트에서 `mkdir -p`로 빈 폴더만 만들어도 동일하게 막힌다.
+
+**해결:** 출력 폴더는 학습 프로세스가 만든다. 스크립트에서 사전 `mkdir` 제거. 처음부터 다시 돌릴 때는 `rm -rf ai/models/26.04.07` 후 재실행.
+
+### 3) 디스크 부족: `OSError: [Errno 28] No space left on device`
+
+**증상:** 비스트리밍으로 데이터셋 로드 시 `datasets`가 parquet를 캐시에 풀다가 실패.
+
+**원인:** 루트 파티션(예: 96GB 중 사용률 98%, 여유 ~2GB)에 `~/.cache/huggingface` 등이 쌓이며, **데이터셋 크기 + HF 캐시**가 동시에 들어가기 어렵다.
+
+**해결:**
+- **용량 확보:** 목표로 **여유 15GB 이상**(가능하면 30GB+) 권장. `conda clean`, 저널 vacuum, `~/.cache/huggingface` 정리, 워크스페이스 내 불필요 빌드·중복 데이터 등.
+- **캐시 위치:** `HF_HOME` / `HF_DATASETS_CACHE`를 `ai/.cache/huggingface` 등 **여유 있는 경로**로 지정(`train_26_04_07.sh`에 반영). `.gitignore`에 `ai/.cache/` 추가.
+
+### 4) 스트리밍 학습: OOM·빈 배치
+
+디스크가 빡빡할 때 `--dataset.streaming true`로 우회를 시도했으나 다음이 발생했다.
+
+| 증상 | 원인·대응 |
+|------|-----------|
+| `DataLoader worker ... Killed` | 스트리밍+고해상도 듀얼 카메라에서 `num_workers`가 크면 RAM 폭증 → OOM. `num_workers=0` 등으로 완화 시도. |
+| `ValueError: Batch does not contain any data (None)` | **Accelerate + IterableDataset(스트리밍)** 조합에서 첫 배치가 비는 케이스. 로컬 학습은 **비스트리밍(`LeRobotDataset`)** 이 더 안정적. |
+| (패치) 스트리밍 `_get_delta_frames` | parquet 행의 `episode_index`가 텐서일 때 `if past_item["episode_index"] == current_episode_idx`가 **0차원 bool 텐서**를 만들어 `RuntimeError` → 상위 `except RuntimeError`에 잡혀 샤드만 삭제되고 이터레이터가 비는 문제가 있어, `ai/lerobot_source/.../streaming_dataset.py`에 스칼라 비교 헬퍼(`_episode_index_eq`) 등을 추가해 두었음. **그래도 스트리밍 경로는 우선 비추천.** |
+
+**실제 채택한 해결:** 디스크 여유 확보 후 **`--dataset.streaming` 끄고** `num_workers=2`로 비스트리밍 학습. 로그에 `streaming: False`이고 스텝이 증가하면 정상.
+
+### 5) 콘솔에서 loss·lr 보기
+
+- LeRobot은 `log_freq` 스텝마다 `train_tracker`(loss, grad_norm, lr 등)를 `logging.info`로 찍는다. 기본 200이면 한동안 조용할 수 있다.
+- **`ai/lerobot/run_lerobot_train.py`**에 `--log_freq`를 추가(기본 50), **`train_26_04_07.sh`**에서 `--log_freq 50` 전달.
+- **이미 실행 중인 프로세스**에는 `log_freq`를 런타임에 바꿀 수 없다. 더 촘촘히 보려면 중단 후 스크립트로 재시작하거나, 터미널에서 `tee`로 로그 파일을 남긴다.
+
+### 6) 관련 파일 변경 요약
+
+- `ai/lerobot/train_26_04_07.sh`: 출력·캐시·비스트리밍·`log_freq`·`num_workers` 등.
+- `ai/lerobot/run_lerobot_train.py`: `--dataset_streaming`, `--num_workers`, `--log_freq`, `--save_freq` 등 `lerobot-train` 전달.
+- `ai/lerobot_source/lerobot/src/lerobot/datasets/streaming_dataset.py`: 스트리밍 시 에피소드 인덱스 비교·`task_index` 정수화(로컬 이미지 parquet 호환).
+- `.gitignore`: `ai/.cache/`.
+
+---
+
 ## 26.04.10 추론(Indy7+Mark7+RealSense) 트러블슈팅 및 운영 정리
 
 ### 1) `autonomy_enabled:=true`인데 Indy7 팔이 전혀 움직이지 않음
@@ -420,9 +475,10 @@ print("fraction all joints |dq|<1e-4:", (np.abs(dq) < 1e-4).all(axis=1).mean())
 
 ---
 
-## 현재까지 요약 (26.04.10 기준)
+## 현재까지 요약 (26.04.11 기준)
 
 - **네트워크:** Indy용 USB 이더넷은 동글·MAC에 따라 `enx...` 이름이 바뀌므로 `indy7-static`의 `connection.interface-name`을 실제 인터페이스에 맞출 것.
 - **추론:** ZMQ 서버 선기동 → `inference.launch.py`; 팔 명령은 **`indy_srv`로 관절 절대 텔레옵(기본 code 6)** 준비 후 궤적 토픽이 먹힘.
 - **체감 속도/델타:** `action_delta_scale`·360×480 리사이즈 옵션으로 튜닝; 안전 거리·E-stop 유지.
 - **데이터/모델 경로:** `ai/datasets/`, `ai/models/`, `ai/logs/` 구조로 통일; 문서·런치·래퍼 기본값 반영됨.
+- **26.04.07 학습:** 루트 디스크 여유·`HF_HOME`/`HF_DATASETS_CACHE`·비스트리밍·`log_freq` 등은 위 **「26.04.07 데이터 변환·학습 파이프라인 트러블슈팅」** 절 참고.
