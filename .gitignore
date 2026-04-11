@@ -19,7 +19,7 @@ ros2_ws/log/
 # 데이터
 *.mp4
 *.npz
-datasets
+/datasets
 raw_data
 # LeRobot 학습 데이터·체크포인트 (용량 큼)
 ai/models/
