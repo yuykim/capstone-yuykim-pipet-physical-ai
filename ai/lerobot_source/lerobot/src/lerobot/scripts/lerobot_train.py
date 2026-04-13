@@ -429,6 +429,13 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         # increment `step` here.
         step += 1
         if is_main_process:
+            # tqdm 한 줄에 메트릭 표시(INFO 로그는 진행 줄에 묻히기 쉬움)
+            progbar.set_postfix(
+                loss=f"{train_tracker.loss.val:.4f}",
+                lr=f"{train_tracker.lr.val:.1e}",
+                grdn=f"{train_tracker.grad_norm.val:.2f}",
+                refresh=False,
+            )
             progbar.update(1)
         train_tracker.step()
         is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0 and is_main_process
@@ -436,7 +443,8 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         is_eval_step = cfg.eval_freq > 0 and step % cfg.eval_freq == 0
 
         if is_log_step:
-            logging.info(train_tracker)
+            # tqdm 진행 줄을 깨지 않고 요약 한 줄 출력(logging.info 만 쓰면 같은 줄에 묻힘)
+            tqdm.write(str(train_tracker))
             if wandb_logger:
                 wandb_log_dict = train_tracker.to_dict()
                 if output_dict:
