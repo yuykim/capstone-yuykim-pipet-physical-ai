@@ -473,6 +473,55 @@ print("fraction all joints |dq|<1e-4:", (np.abs(dq) < 1e-4).all(axis=1).mean())
 
 - **SIGINT**로 스핀 중인 노드가 종료될 때 흔히 나오는 현상. `launch`에서 exit code -2를 비정상으로 찍을 수 있으나, **의도적 중단**이면 무시해도 됨.
 
+### 7) 26.04.07 `050000` 체크포인트 추론 점검 (26.04.11)
+
+#### 7-1) `ModuleNotFoundError: lerobot.configs.policies`
+
+**증상:** `python -m pipet_inference.zmq_act_server --model-path .../checkpoints/050000` 실행 시 `No module named 'lerobot.configs.policies'`.
+
+**원인:** conda `lerobot` editable 경로가 `ai/lerobot_source/lerobot`가 아니라 **불완전 복사본** `ai/huggingFace/lerobot/src`를 가리켰다.
+
+**확인 포인트:**
+- `lerobot.configs`는 잡히는데 `lerobot.configs.policies`는 없음
+- `site-packages/__editable__.lerobot-0.5.1.pth`가 `ai/huggingFace/lerobot/src`를 가리킴
+
+**해결:** 아래처럼 재설치해 editable path를 `ai/lerobot_source/lerobot`로 교정.
+
+```bash
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate lerobot
+pip uninstall -y lerobot
+pip install -e /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai/ai/lerobot_source/lerobot
+```
+
+#### 7-2) 추론은 동작하지만 그리퍼가 `open ↔ grasp` 반복(플리킹)
+
+**증상 로그:** `grip_preset_node`에서 `open`/`grasp`가 약 1초 간격으로 계속 교차. `inference_node`는 `delta_norm=0.0048`, `grip_cmd=1` 주기 로그.
+
+**해석:**
+- ZMQ 사이드카, 추론 루프, Mark7 서비스 호출 경로 자체는 정상 동작.
+- 다만 그리퍼 분류 출력이 경계에서 흔들려 실제 서비스 호출은 `open`과 `grasp`를 왕복.
+- 팔 델타는 작아(`delta_norm~0.0048`) 체감 움직임이 약할 수 있음.
+
+**운영 대응:**
+- 런치 인자로 `action_delta_scale:=8.0`(또는 10.0 근처) 상향
+- 학습 해상도가 360x480이면 `image_target_height:=360 image_target_width:=480` 적용
+- 근본적으로는 `inference_node` 그리퍼 명령에 히스테리시스/쿨다운(짧은 시간 재전환 금지) 추가 권장
+
+#### 7-3) `ai/huggingFace` 폴더 정리(삭제)
+
+**왜 생겼는가:**
+- 과거에 LeRobot 코드를 로컬에서 별도 복사/실험하면서 `ai/huggingFace/lerobot` 트리가 생성된 것으로 확인.
+- conda editable 설치가 이 경로를 참조(`.../__editable__.lerobot-0.5.1.pth`)하면서, 프로젝트의 기준 트리 `ai/lerobot_source/lerobot` 대신 이 복사본이 import됨.
+
+**왜 문제가 되었는가:**
+- `ai/huggingFace/lerobot`는 **불완전 트리**여서(예: `pyproject.toml`, `src/lerobot/configs/policies.py` 부재), 추론 시작 시 `ModuleNotFoundError: lerobot.configs.policies`를 유발.
+- 동일 저장소에 LeRobot 소스가 `ai/lerobot_source/lerobot`로 이미 존재하므로, 중복/혼선만 키움.
+
+**조치:**
+- editable 설치 경로를 `ai/lerobot_source/lerobot`로 교정 후, `ai/huggingFace` 폴더를 삭제.
+- 운영 기준 LeRobot 소스는 `ai/lerobot_source/lerobot` 단일 경로로 통일.
+
 ---
 
 ## 현재까지 요약 (26.04.11 기준)
