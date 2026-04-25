@@ -531,3 +531,81 @@ pip install -e /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai/ai/lerob
 - **체감 속도/델타:** `action_delta_scale`·360×480 리사이즈 옵션으로 튜닝; 안전 거리·E-stop 유지.
 - **데이터/모델 경로:** `ai/datasets/`, `ai/models/`, `ai/logs/` 구조로 통일; 문서·런치·래퍼 기본값 반영됨.
 - **26.04.07 학습:** 루트 디스크 여유·`HF_HOME`/`HF_DATASETS_CACHE`·비스트리밍·`log_freq` 등은 위 **「26.04.07 데이터 변환·학습 파이프라인 트러블슈팅」** 절 참고.
+
+---
+
+## 26.04.26 yuykim/dogyung 반영, 텔레옵, 실행 문서 정리
+
+### 1) `dogyung` 브랜치 기능 확인 및 `yuykim` 반영
+
+- GitHub의 `dogyung` 브랜치를 가져와 `yuykim`과 비교했다.
+- `dogyung`에 있던 데이터 수집 discard 기능만 `yuykim`으로 가져왔다.
+- 반영 커밋: `b9a27ef Add discard option (X) to skip saving episode on recording stop`
+**변경 내용**
+
+- `pipet_data_collector/data_collector_node.py`: `/data_collector/discard` 서비스 추가
+- `pipet_system_teleop/system_teleop_node.py`: 녹화 종료 시 `[Y] Success / [N] Fail / [X] Discard` 선택지 추가
+- `X` 선택 시 현재 녹화 버퍼를 저장하지 않고 폐기하도록 정리했다.
+
+### 2) `AGENTS.md` 추가 및 MuJoCo 상태 명시
+
+- 레포 루트에 `AGENTS.md`를 추가해 협업/운영 기준을 정리했다.
+- `mujoco_env`는 현재 실험적 상태로 기록했다.
+- 현재 `mujoco_env`는 Indy7 URDF/mesh 기반 viewer와 간단한 NPZ 수집은 가능하지만, Mark7 그리퍼와의 실제 접촉/상호작용 시뮬레이션은 완성되지 않았다.
+- `mujoco_env`는 `ros2_ws/src/indy7_ros2`를 런타임에 직접 읽는 구조가 아니라, `mujoco_env/indy7_urdf`, `assets`, `generated`에 복사/가공된 모델 파일을 사용한다.
+- 따라서 `indy_driver`, `indy_moveit`은 MuJoCo 실행 경로가 아니라 실제 ROS2 로봇 제어 경로에 속한다.
+
+### 3) Indy7 Cartesian X/Y/Z 텔레옵 추가
+
+- 기존 텔레옵은 각 관절 중심 조작/직접교시 중심이었고, Neuromeka 제공 코드에는 Cartesian jog가 구현되어 있었다.
+- Neuromeka `servo_keyboard_input.py` 방식을 참고해 `system_teleop_node.py`에 MoveIt Servo 기반 Cartesian jog를 추가했다.
+- `/servo_node/start_servo` 서비스를 호출해 Servo를 시작하고, `/servo_node/delta_twist_cmds`로 `geometry_msgs/TwistStamped`를 publish한다.
+- 실제 로봇 teleop 모드 진입을 위해 `indy_srv`에 `MSG_TELE_JOINT_ABS = 6`을 호출한다.
+- Cartesian 조작 중 다른 모드로 전환하거나 종료할 때 `MSG_TELE_STOP = 8`을 호출하고 zero twist를 publish하도록 했다.
+**추가 키 매핑**
+
+- 방향키: X/Y 이동
+- `;` / `.`: Z up/down
+- `B` / `T`: base frame(`link0`) / TCP frame(`tcp`) 전환
+- `9` / `0`: Cartesian 속도 down/up
+- 기존 `R`은 Mark7 release, `E`는 error recovery로 유지해 기존 통합 텔레옵 동작과 충돌하지 않게 했다.
+
+### 4) MoveIt Servo launch 옵션 추가
+
+- `pipet_bringup/launch/indy7_only.launch.py`에 `enable_cartesian_servo` 인자를 추가했다.
+- `pipet_bringup/launch/data_collection.launch.py`에도 동일 인자를 추가했다.
+- 기본값은 `false`로 두어 기존 데이터 수집 launch 동작은 유지한다.
+- X/Y/Z Cartesian 조작이 필요할 때만 아래처럼 켠다.
+
+```bash
+ros2 launch pipet_bringup indy7_only.launch.py indy_ip:=192.168.1.10 enable_cartesian_servo:=true
+ros2 run pipet_system_teleop system_teleop_node
+```
+
+### 5) README 빠른 실행 코드 정리
+
+- 루트 `README.md` 상단에 `빠른 실행 코드` 섹션을 추가했다.
+**포함 항목**
+
+- 학습 실행 코드
+- 데이터 수집 실행 코드
+- 그리퍼 조작 테스트 코드
+- Indy7 조작 코드
+- 카메라 2개 화면 확인 코드
+- 그리퍼 테스트 명령은 실제 `setup.py` entry point 기준으로 `teleop_keyboard`, `grip_preset_node`를 사용하도록 적었다.
+
+### 6) 검증 및 남은 주의사항
+
+- Python AST 문법 체크 통과:
+
+```bash
+python -c "import ast, pathlib; files=[...]; [ast.parse(pathlib.Path(f).read_text(encoding='utf-8'), filename=f) for f in files]"
+```
+
+- `git diff --check` 통과.
+- 하드웨어 smoke test는 아직 수행하지 않았다.
+- `ros2_ws/src/indy7_ros2`는 submodule이며, 확인 과정에서 로컬 checkout 상태가 dirty가 되었다.
+- 부모 레포는 `indy7_ros2`를 `b4df14ba...`에 고정하고 있으나 해당 커밋을 remote에서 받지 못했고, 로컬 submodule HEAD는 `3f326e1...`로 확인됐다.
+- 이 submodule dirty 상태는 `3d1e4f0 feat: add Cartesian teleop and run docs` 커밋에 포함하지 않았다.
+- `indy7_ros2`를 최신 브랜치로 새로 pull해 submodule pointer를 올리는 작업은 나중에 별도 커밋으로 진행한다.
+- 이유: `indy_driver`, `indy_description`, `indy_moveit` 변경은 `/joint_states`, `indy_srv`, controller topic, MoveIt Servo 설정에 영향을 줄 수 있어 데이터 수집 smoke test와 함께 검증해야 한다.
