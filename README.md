@@ -8,6 +8,123 @@
 
 ---
 
+## 빠른 실행 코드
+
+아래 명령은 레포 루트에서 실행한다. 새 터미널을 열 때마다 먼저 ROS2 환경을 로드한다.
+
+```bash
+cd <repo_root>
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+```
+
+### 1. 학습 실행
+
+```bash
+python ai/lerobot/run_lerobot_train.py \
+  --episodes_dir episodes \
+  --dataset_output_dir ai/datasets/pipet_dataset \
+  --dataset_repo_id pipet_dataset \
+  --job_name act_pipet \
+  --device cuda
+```
+
+### 2. 데이터 수집 실행
+
+터미널 1에서 전체 하드웨어와 데이터 수집 노드를 띄운다.
+
+```bash
+ros2 launch pipet_bringup data_collection.launch.py indy_ip:=192.168.1.10
+```
+
+터미널 2에서 통합 조작 노드를 실행한다.
+
+```bash
+ros2 run pipet_system_teleop system_teleop_node
+```
+
+`SPACE`로 녹화를 시작/종료하고, 종료 시 `Y` 성공, `N` 실패, `X` 폐기를 선택한다.
+
+### 3. 그리퍼 조작 테스트
+
+터미널 1에서 Mark7 드라이버를 실행한다.
+
+```bash
+ros2 launch pipet_hand_mark7_driver mark7_hardware.launch.py port:=/dev/ttyACM0
+```
+
+터미널 2에서 손가락 목표값을 직접 입력하는 테스트 노드를 실행한다.
+
+```bash
+ros2 run pipet_hand_mark7_teleop teleop_keyboard
+```
+
+프리셋 서비스로 테스트하려면 터미널 2에서 프리셋 노드를 띄운 뒤, 터미널 3에서 원하는 서비스를 호출한다.
+
+```bash
+ros2 run pipet_hand_mark7_teleop grip_preset_node
+```
+
+```bash
+ros2 service call /gripper/open std_srvs/srv/Trigger {}
+ros2 service call /gripper/grasp std_srvs/srv/Trigger {}
+ros2 service call /gripper/press std_srvs/srv/Trigger {}
+ros2 service call /gripper/release std_srvs/srv/Trigger {}
+```
+
+### 4. Indy7 조작
+
+터미널 1에서 Indy7 드라이버를 실행한다. Cartesian X/Y/Z 조작까지 쓰려면 `enable_cartesian_servo:=true`를 켠다.
+
+```bash
+ros2 launch pipet_bringup indy7_only.launch.py indy_ip:=192.168.1.10 enable_cartesian_servo:=true
+```
+
+터미널 2에서 텔레옵 노드를 실행한다.
+
+```bash
+ros2 run pipet_system_teleop system_teleop_node
+```
+
+주요 키는 `H` home, `D/d` direct teaching ON/OFF, 방향키 X/Y, `;`/`.` Z up/down, `B/T` base/TCP frame, `9/0` 속도 조절이다.
+
+### 5. 카메라 2개 화면 확인
+
+데이터 수집 launch를 이미 실행 중이면 카메라 노드는 떠 있으므로 화면만 띄우면 된다.
+
+```bash
+ros2 run rqt_image_view rqt_image_view /wrist_camera/camera/color/image_raw
+```
+
+```bash
+ros2 run rqt_image_view rqt_image_view /overhead_camera/camera/color/image_raw
+```
+
+카메라만 단독으로 띄울 때는 두 터미널에서 각각 RealSense 노드를 실행한 뒤 위의 `rqt_image_view` 명령을 실행한다.
+
+```bash
+ros2 run realsense2_camera realsense2_camera_node --ros-args \
+  -r __ns:=/wrist_camera \
+  -r __node:=camera \
+  -p serial_no:="_844212071939" \
+  -p enable_color:=true \
+  -p enable_depth:=true \
+  -p align_depth.enable:=true
+```
+
+```bash
+ros2 run realsense2_camera realsense2_camera_node --ros-args \
+  -r __ns:=/overhead_camera \
+  -r __node:=camera \
+  -p serial_no:="_317222074298" \
+  -p enable_color:=true \
+  -p enable_depth:=true \
+  -p align_depth.enable:=true
+```
+
+---
+
 ## 1. 프로젝트 개요
 
 Indy7 로봇팔 + Mark7 로봇손 + RealSense D435(손목/오버헤드) 2대를 사용해

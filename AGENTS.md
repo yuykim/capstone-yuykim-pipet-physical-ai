@@ -27,13 +27,14 @@ ROS2 teleop/data collection -> episode_*.npz -> LeRobotDataset -> training -> RO
 - `ros2_ws/src/pipet_inference/`: trained-policy inference nodes and helpers.
 - `ros2_ws/src/mark7/`: Mark7 messages, driver, description, and teleop.
 - `ai/`: data conversion, LeRobot training wrappers, logs, and vendored/reference LeRobot source.
-- `mujoco_env/`: MuJoCo experiments and heavy robot mesh assets.
+- `mujoco_env/`: experimental MuJoCo workspace. It was intended to simulate Indy7 and the Mark7 gripper interacting in a virtual scene, but it is not a working production path yet.
 - `docs/`: architecture, interface, history, Mark7, and AI notes.
 
 ## Working Rules
 
 - Prefer small, focused changes. Do not merge broad branch differences when only one feature is needed.
 - Be especially careful with `mujoco_env/`: it contains large mesh assets. Do not delete, move, or regenerate these files unless explicitly requested.
+- Do not assume `mujoco_env/` is functional. Treat it as an incomplete prototype unless the user explicitly asks to revive or debug it.
 - Be especially careful with `ai/lerobot_source/`: it is vendored/reference upstream code. Avoid editing it unless the task specifically requires a LeRobot patch.
 - Do not commit datasets, checkpoints, cache, or runtime logs. Expected generated paths include `episodes/`, `ai/datasets/`, `ai/models/`, `ai/.cache/`, `build/`, `install/`, and `log/`.
 - Preserve the NPZ contract used by conversion and training unless updating every dependent path together.

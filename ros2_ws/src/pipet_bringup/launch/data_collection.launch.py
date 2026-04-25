@@ -17,6 +17,7 @@ from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
 )
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
@@ -51,6 +52,11 @@ def generate_launch_description():
         'camera_fps', default_value='15',
         description='RealSense camera FPS',
     )
+    enable_cartesian_servo_arg = DeclareLaunchArgument(
+        'enable_cartesian_servo',
+        default_value='false',
+        description='Launch indy_moveit MoveIt Servo for Cartesian teleop',
+    )
 
     # -- 1. Indy7 Driver --
 
@@ -65,6 +71,21 @@ def generate_launch_description():
             'indy_ip': LaunchConfiguration('indy_ip'),
             'indy_type': LaunchConfiguration('indy_type'),
             'launch_rviz': 'false',
+        }.items(),
+    )
+
+    moveit_servo_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource([
+            PathJoinSubstitution([
+                FindPackageShare('indy_moveit'),
+                'launch', 'moveit.launch.py',
+            ])
+        ]),
+        condition=IfCondition(LaunchConfiguration('enable_cartesian_servo')),
+        launch_arguments={
+            'indy_type': LaunchConfiguration('indy_type'),
+            'servo_mode': 'true',
+            'launch_rviz_moveit': 'false',
         }.items(),
     )
 
@@ -161,7 +182,9 @@ def generate_launch_description():
         use_mock_mark7_arg,
         output_dir_arg,
         camera_fps_arg,
+        enable_cartesian_servo_arg,
         indy_driver_launch,
+        moveit_servo_launch,
         mark7_driver_launch,
         grip_preset_node,
         wrist_camera_node,

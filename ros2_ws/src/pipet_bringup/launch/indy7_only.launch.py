@@ -8,6 +8,7 @@ Starts Indy7 driver only. Use system_teleop for control:
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.substitutions import FindPackageShare
@@ -24,6 +25,11 @@ def generate_launch_description():
     launch_rviz_arg = DeclareLaunchArgument(
         'launch_rviz', default_value='true',
     )
+    enable_cartesian_servo_arg = DeclareLaunchArgument(
+        'enable_cartesian_servo',
+        default_value='false',
+        description='Launch indy_moveit MoveIt Servo for Cartesian teleop',
+    )
 
     indy_driver_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
@@ -39,9 +45,26 @@ def generate_launch_description():
         }.items(),
     )
 
+    moveit_servo_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource([
+            PathJoinSubstitution([
+                FindPackageShare('indy_moveit'),
+                'launch', 'moveit.launch.py',
+            ])
+        ]),
+        condition=IfCondition(LaunchConfiguration('enable_cartesian_servo')),
+        launch_arguments={
+            'indy_type': LaunchConfiguration('indy_type'),
+            'servo_mode': 'true',
+            'launch_rviz_moveit': 'false',
+        }.items(),
+    )
+
     return LaunchDescription([
         indy_ip_arg,
         indy_type_arg,
         launch_rviz_arg,
+        enable_cartesian_servo_arg,
         indy_driver_launch,
+        moveit_servo_launch,
     ])
