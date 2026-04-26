@@ -5,7 +5,8 @@
 
 현재 기준:
 - Indy7: MuJoCo 로드/뷰어/데이터 수집 동작
-- Mark7 그리퍼: `xacro` 상태(추가 변환 작업 필요)
+- Mark7: `pipet_gripper_Mark7`의 `pipet_hand_mark7.xacro`를 변환해 결합
+- 결합 상태: `prepare_models.py`가 Indy7 `link6`에 실제 Mark7 링크/조인트(간이 프리셋 제어) 자동 추가
 
 ---
 
@@ -64,8 +65,10 @@ python mujoco_env/scripts/prepare_models.py
    - `meshdir="../assets/indy7"`
    - `balanceinertia="true"`
 6. 결과를 `generated/indy7_mujoco.urdf`로 저장
+7. `pipet_gripper_Mark7`의 xacro를 URDF로 변환해 `link6`에 고정 결합
 
 즉, 원본 URDF를 직접 수정하지 않고 MuJoCo 전용 URDF를 생성합니다.
+그리퍼 제어 키(`G/O/P/R`)는 현재 실제 Mark7 관절들에 대한 프리셋(열기/잡기/누르기/릴리즈)로 동작합니다.
 
 ### 3-2) 뷰어로 동작 확인
 
@@ -116,7 +119,47 @@ python mujoco_env/scripts/prepare_models.py
 python mujoco_env/scripts/collect_dataset.py --seconds 2 --hz 10 --success
 ```
 
-### 5-2) 수집 파일 확인
+### 5-2) Indy7 키보드 Cartesian 조작 (X/Y/Z)
+
+Neuromeka 쪽 Cartesian 조작 흐름(축 jog + 속도/프레임 전환)을 MuJoCo용으로 맞춘 스크립트:
+
+```bash
+python mujoco_env/scripts/keyboard_cartesian_teleop.py
+```
+
+키 매핑:
+
+- `Arrow Up/Down` 또는 `W/S`: `+X / -X`
+- `Arrow Left/Right` 또는 `A/D`: `+Y / -Y`
+- `;` / `.` 또는 `Q/E`: `+Z / -Z`
+- `8/2/4/6`: `+X/-X/+Y/-Y` (화살표 대체)
+- `[` / `]`: 속도 감소/증가
+- `-` / `=`: 관절 속도 게인 감소/증가
+- `H`: 컨트롤러 home 자세로 즉시 복귀
+- `Shift+H`: 텔레옵 시작 자세로 이동
+- `G` / `O`: `grasp` / `open` (실제 Mark7 preset)
+- `P` / `R`: `press` / `release` (실제 Mark7 preset)
+- `B` / `T`: World/Tool frame 전환
+- `Space`: 정지
+- `Q`: 종료
+
+옵션 예시:
+
+```bash
+python mujoco_env/scripts/keyboard_cartesian_teleop.py \
+  --model mujoco_env/generated/indy7_mujoco.urdf \
+  --linear-speed 0.16 \
+  --damping 1e-4 \
+  --qvel-gain 3.0 \
+  --max-qvel 2.5 \
+  --home-qpos "0,-0.436,2.007,0,1.571,0" \
+  --teleop-start-qpos "0,0.611,-2.618,0,0.436,0"
+```
+
+기본은 **kinematic 모드**(정지 시 처짐 방지)로 동작합니다.  
+동역학(`mj_step`)으로 보고 싶으면 `--dynamic`을 추가하세요.
+
+### 5-3) 수집 파일 확인
 
 ```bash
 python - <<'PY'
