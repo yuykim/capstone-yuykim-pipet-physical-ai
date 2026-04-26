@@ -713,7 +713,7 @@ python -c "import ast, pathlib; files=[...]; [ast.parse(pathlib.Path(f).read_tex
   - `link6`에 `mark7_mount_joint`(fixed)로 결합
 - Mark7 소스 경로는 자동 탐색:
   - 우선 `ros2_ws/src/mark7/pipet_hand_mark7_description`
-  - 대안 `pipet_gripper_Mark7/src/pipet_hand_mark7_description`
+  - 대안 `external/pipet_gripper_Mark7/src/pipet_hand_mark7_description`
 
 ### 3) Mark7 프리셋 조작 반영 및 mimic 보정
 

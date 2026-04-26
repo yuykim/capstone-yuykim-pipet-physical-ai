@@ -5,7 +5,7 @@
 
 현재 기준:
 - Indy7: MuJoCo 로드/뷰어/데이터 수집 동작
-- Mark7: `pipet_gripper_Mark7`의 `pipet_hand_mark7.xacro`를 변환해 결합
+- Mark7: `external/pipet_gripper_Mark7`의 `pipet_hand_mark7.xacro`를 변환해 결합
 - 결합 상태: `prepare_models.py`가 Indy7 `link6`에 실제 Mark7 링크/조인트(간이 프리셋 제어) 자동 추가
 
 ---
@@ -65,7 +65,7 @@ python mujoco_env/scripts/prepare_models.py
    - `meshdir="../assets/indy7"`
    - `balanceinertia="true"`
 6. 결과를 `generated/indy7_mujoco.urdf`로 저장
-7. `pipet_gripper_Mark7`의 xacro를 URDF로 변환해 `link6`에 고정 결합
+7. `external/pipet_gripper_Mark7`의 xacro를 URDF로 변환해 `link6`에 고정 결합
 
 즉, 원본 URDF를 직접 수정하지 않고 MuJoCo 전용 URDF를 생성합니다.
 그리퍼 제어 키(`G/O/P/R`)는 현재 실제 Mark7 관절들에 대한 프리셋(열기/잡기/누르기/릴리즈)로 동작합니다.
