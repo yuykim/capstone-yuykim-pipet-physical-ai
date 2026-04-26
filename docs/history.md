@@ -690,3 +690,41 @@ python -c "import ast, pathlib; files=[...]; [ast.parse(pathlib.Path(f).read_tex
   - 데이터 추가 수집(다양한 파이펫 위치/조명/배경),
   - 보조 판단 스키마(JSON) 정의,
   - 오프라인 태깅 파이프라인(에피소드 난이도/가시성 점수화)부터 적용.
+
+---
+
+## 26.04.27 MuJoCo Indy7 + Mark7 통합/텔레옵 정리
+
+### 1) MuJoCo 텔레옵 스크립트 추가
+
+- `mujoco_env/scripts/keyboard_cartesian_teleop.py`를 추가해 Indy7 Cartesian 키보드 조작을 구현.
+- 키 매핑:
+  - 이동: `W/S`(+/-X), `A/D`(+/-Y), `Q/E`(+/-Z)
+  - 프레임/속도: `B/T`(world/tool), `[`/`]`(속도), `-`/`=`(qvel gain)
+  - 자세: `H`(controller home), `Shift+H`(teleop start)
+- 기본 제어는 kinematic 적분(정지 시 처짐 방지), 필요 시 `--dynamic`으로 동역학 스텝 사용.
+
+### 2) Mark7 실제 xacro 기반 결합
+
+- `mujoco_env/scripts/prepare_models.py`를 확장:
+  - Indy7 URDF + Mark7 xacro를 결합해 `generated/indy7_mujoco.urdf` 생성
+  - `meshdir`를 `../assets`로 통일하고 `indy7/`, `mark7/` 하위 mesh를 사용
+  - Mark7 링크/조인트 이름에 `mark7_` prefix를 부여해 이름 충돌 회피
+  - `link6`에 `mark7_mount_joint`(fixed)로 결합
+- Mark7 소스 경로는 자동 탐색:
+  - 우선 `ros2_ws/src/mark7/pipet_hand_mark7_description`
+  - 대안 `pipet_gripper_Mark7/src/pipet_hand_mark7_description`
+
+### 3) Mark7 프리셋 조작 반영 및 mimic 보정
+
+- 실제 프리셋(`grip_presets.yaml`)을 기준으로 `G/O/P/R` 동작을 반영:
+  - `grasp/open/press/release` 순서와 step 값을 그대로 사용
+  - step -> rad 변환을 적용해 MuJoCo 관절 목표값으로 매핑
+- MuJoCo에서 `mimic`이 자동 적용되지 않는 경우를 보완하기 위해,
+  - index/middle/ringer/pinky/thumb 상부 관절을 하부 관절 값에 수동 동기화.
+
+### 4) 결과
+
+- MuJoCo 장면에서 Indy7과 Mark7이 함께 로드되고,
+- 키보드로 Indy7 Cartesian 이동 + Mark7 프리셋 조작이 가능해짐.
+- 장착 자세(`mark7_mount_joint`의 `xyz/rpy`)는 작업 포즈 기준 미세 튜닝 가능 상태.
