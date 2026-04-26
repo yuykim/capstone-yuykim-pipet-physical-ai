@@ -103,6 +103,23 @@ def main() -> None:
         default=1e-4,
         help="Per-step joint delta threshold (rad) for idle detection during conversion.",
     )
+    parser.add_argument(
+        "--state_profile",
+        choices=["baseline", "extended"],
+        default="baseline",
+        help="Dataset state profile for conversion (baseline=18D, extended=+ee_pose+gripper_state).",
+    )
+    parser.add_argument(
+        "--include_depth",
+        action="store_true",
+        help="Include depth observations during conversion as additional image features.",
+    )
+    parser.add_argument(
+        "--convert_log_every_frames",
+        type=int,
+        default=200,
+        help="Conversion progress log interval in frames (0 disables).",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -130,6 +147,8 @@ def main() -> None:
             str(args.fps),
             "--task",
             args.task,
+            "--log_every_frames",
+            str(args.convert_log_every_frames),
         ]
         if args.only_success:
             cmd_convert.append("--only_success")
@@ -141,8 +160,10 @@ def main() -> None:
                 str(args.drop_idle_sec),
                 "--idle_joint_delta_thresh",
                 str(args.idle_joint_delta_thresh),
-                
             ]
+        cmd_convert += ["--state_profile", args.state_profile]
+        if args.include_depth:
+            cmd_convert.append("--include_depth")
         run(cmd_convert)
 
     # 학습 단계: 로컬 데이터셋은 --dataset.root 로 전달한다.

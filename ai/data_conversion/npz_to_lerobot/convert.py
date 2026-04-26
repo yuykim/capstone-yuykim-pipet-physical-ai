@@ -89,6 +89,24 @@ def _ensure_joint_matrix_n6(arr: np.ndarray, name: str) -> np.ndarray:
     return out
 
 
+def _ensure_matrix(arr: np.ndarray, cols: int, name: str) -> np.ndarray:
+    """주어진 열 수(cols)에 맞춰 2D 행렬을 보정한다."""
+    a = np.asarray(arr, dtype=np.float32)
+    if a.ndim != 2:
+        raise ValueError(f"{name} expected 2D array, got shape {a.shape}")
+    n = a.shape[0]
+    c = a.shape[1]
+    if c == cols:
+        return a
+    if c == 0:
+        return np.zeros((n, cols), dtype=np.float32)
+    if c > cols:
+        return a[:, :cols].astype(np.float32)
+    out = np.zeros((n, cols), dtype=np.float32)
+    out[:, :c] = a
+    return out
+
+
 def _build_features(h: int, w: int) -> dict[str, dict[str, Any]]:
     # LeRobot의 dataset feature spec에서 이미지 shape는 (H, W, C)로 정의한다.
     # 실제 프레임 값은 HWC/CHW 모두 받아들이지만, 우리는 NPZ가 HWC이므로 그대로 사용한다.
@@ -122,6 +140,65 @@ def _build_features(h: int, w: int) -> dict[str, dict[str, Any]]:
             "names": action_names,
         },
     }
+
+
+def _build_features_ext(
+    h: int,
+    w: int,
+    *,
+    include_ee_pose: bool,
+    include_gripper_state: bool,
+    include_depth: bool,
+) -> dict[str, dict[str, Any]]:
+    image_shape = (h, w, 3)  # HWC
+    state_names = (
+        [f"joint_positions_{i}" for i in range(6)]
+        + [f"joint_velocities_{i}" for i in range(6)]
+        + [f"joint_efforts_{i}" for i in range(6)]
+    )
+    if include_ee_pose:
+        state_names += [f"ee_pose_{i}" for i in range(7)]
+    if include_gripper_state:
+        state_names += ["gripper_state"]
+    action_names = [f"delta_q_{i}" for i in range(6)] + ["gripper_action"]
+
+    out: dict[str, dict[str, Any]] = {
+        "observation.images.front": {
+            "dtype": "image",
+            "shape": image_shape,
+            "names": ["height", "width", "channels"],
+        },
+        "observation.images.overhead": {
+            "dtype": "image",
+            "shape": image_shape,
+            "names": ["height", "width", "channels"],
+        },
+        "observation.state": {
+            "dtype": "float32",
+            "shape": (len(state_names),),
+            "names": state_names,
+        },
+        "action": {
+            "dtype": "float32",
+            "shape": (len(action_names),),
+            "names": action_names,
+        },
+    }
+    if include_depth:
+        # LeRobot image writer currently expects 3-channel images.
+        # Keep depth as pseudo-RGB (same value repeated across channels).
+        depth_shape = (h, w, 3)
+        out["observation.images.front_depth"] = {
+            "dtype": "image",
+            "shape": depth_shape,
+            "names": ["height", "width", "channels"],
+        }
+        out["observation.images.overhead_depth"] = {
+            "dtype": "image",
+            "shape": depth_shape,
+            "names": ["height", "width", "channels"],
+        }
+    return out
 
 
 def _compute_idle_keep_mask(
@@ -171,6 +248,31 @@ def _compute_idle_keep_mask(
     return keep
 
 
+def _depth_u16_to_u8_rgb(depth_hw: np.ndarray) -> np.ndarray:
+    """
+    uint16 depth(mm) -> uint8 pseudo-RGB.
+    - invalid(0) stays 0
+    - robust min/max scaling using valid pixels only
+    """
+    d = np.asarray(depth_hw)
+    if d.ndim != 2:
+        raise ValueError(f"depth image must be 2D, got shape {d.shape}")
+    d = d.astype(np.float32, copy=False)
+    valid = d > 0
+    out_u8 = np.zeros_like(d, dtype=np.uint8)
+    if np.any(valid):
+        v = d[valid]
+        lo = float(np.percentile(v, 1.0))
+        hi = float(np.percentile(v, 99.0))
+        if hi <= lo:
+            hi = lo + 1.0
+        scaled = (d - lo) / (hi - lo)
+        scaled = np.clip(scaled, 0.0, 1.0)
+        out_u8 = (scaled * 255.0).astype(np.uint8)
+        out_u8[~valid] = 0
+    return np.repeat(out_u8[..., None], 3, axis=2)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--episodes_dir", required=True, help="Folder containing episodes/*.npz")
@@ -197,6 +299,23 @@ def main() -> None:
         type=float,
         default=1e-4,
         help="Per-step joint delta threshold (rad) for idle detection.",
+    )
+    parser.add_argument(
+        "--state_profile",
+        choices=["baseline", "extended"],
+        default="baseline",
+        help="baseline: q/dq/tau(18D), extended: +ee_pose(7D)+gripper_state(1D).",
+    )
+    parser.add_argument(
+        "--include_depth",
+        action="store_true",
+        help="Include wrist/overhead depth as additional 1-channel image features.",
+    )
+    parser.add_argument(
+        "--log_every_frames",
+        type=int,
+        default=200,
+        help="Print conversion progress every N kept frames (0 disables).",
     )
     args = parser.parse_args()
 
@@ -258,7 +377,15 @@ def main() -> None:
         rh, rw = h, w
         cv2 = None  # type: ignore
 
-    features = _build_features(h=h, w=w)
+    include_ee_pose = args.state_profile == "extended"
+    include_gripper_state = args.state_profile == "extended"
+    features = _build_features_ext(
+        h=h,
+        w=w,
+        include_ee_pose=include_ee_pose,
+        include_gripper_state=include_gripper_state,
+        include_depth=bool(args.include_depth),
+    )
 
     output_dir = Path(args.output_dir)
 
@@ -284,6 +411,7 @@ def main() -> None:
 
     kept_episodes = 0
     dropped_idle_frames_total = 0
+    total_kept_frames = 0
     for i, ep_path in enumerate(episode_files):
         with np.load(ep_path) as ep:
             # success 라벨 키가 파이프라인에 따라 다를 수 있어 유연하게 처리한다.
@@ -304,6 +432,12 @@ def main() -> None:
             joint_efforts = _ensure_joint_matrix_n6(ep["joint_efforts"], "joint_efforts")
             wrist_rgb_images = ep["wrist_rgb_images"].astype(np.uint8)
             overhead_rgb_images = ep["overhead_rgb_images"].astype(np.uint8)
+            wrist_depth_images = ep["wrist_depth_images"] if "wrist_depth_images" in ep else None
+            overhead_depth_images = ep["overhead_depth_images"] if "overhead_depth_images" in ep else None
+            ee_pose = _ensure_matrix(ep["ee_pose"], 7, "ee_pose") if "ee_pose" in ep else None
+            gripper_state = (
+                np.asarray(ep["gripper_state"], dtype=np.float32).reshape(-1) if "gripper_state" in ep else None
+            )
             gripper_actions = ep["gripper_actions"]
 
         n = joint_positions.shape[0]
@@ -324,6 +458,7 @@ def main() -> None:
 
         # action은 (t -> t+1) 전이 기반이므로 마지막 timestep은 드랍한다.
         # 모방학습 데이터셋에서도 흔한 처리(마지막에 action이 없는 observation을 남기지 않음).
+        kept_in_episode = 0
         for t in range(n - 1):
             if not keep_mask[t]:
                 continue
@@ -335,6 +470,16 @@ def main() -> None:
             gripper_cmd = float(gripper_actions[t])
 
             state_vec = np.concatenate([q_t, dq_t, tau_t], axis=0).astype(np.float32)
+            if include_ee_pose:
+                ee_vec = ee_pose[t] if ee_pose is not None and len(ee_pose) > t else np.zeros((7,), dtype=np.float32)
+                state_vec = np.concatenate([state_vec, ee_vec.astype(np.float32)], axis=0).astype(np.float32)
+            if include_gripper_state:
+                gs = (
+                    float(gripper_state[t])
+                    if gripper_state is not None and len(gripper_state) > t
+                    else 0.0
+                )
+                state_vec = np.concatenate([state_vec, np.array([gs], dtype=np.float32)], axis=0).astype(np.float32)
             action_vec = np.concatenate([delta_q, np.array([gripper_cmd], dtype=np.float32)], axis=0).astype(
                 np.float32
             )
@@ -351,12 +496,33 @@ def main() -> None:
                 "observation.images.overhead": overhead_rgb_t,
                 "action": action_vec,
             }
+            if args.include_depth:
+                if wrist_depth_images is None or overhead_depth_images is None:
+                    raise ValueError(
+                        "--include_depth enabled but depth keys are missing in "
+                        f"{ep_path}. Required: wrist_depth_images, overhead_depth_images."
+                    )
+                wrist_depth_t = maybe_resize_rgb(_depth_u16_to_u8_rgb(wrist_depth_images[t]))
+                overhead_depth_t = maybe_resize_rgb(_depth_u16_to_u8_rgb(overhead_depth_images[t]))
+                frame["observation.images.front_depth"] = wrist_depth_t
+                frame["observation.images.overhead_depth"] = overhead_depth_t
             dataset.add_frame(frame)
+            kept_in_episode += 1
+            total_kept_frames += 1
+            if args.log_every_frames and args.log_every_frames > 0:
+                if kept_in_episode % args.log_every_frames == 0:
+                    print(
+                        f"[progress] episode={i+1}/{len(episode_files)} "
+                        f"kept_in_episode={kept_in_episode} total_kept={total_kept_frames}"
+                    )
 
         # episode 1개 = demonstration trajectory 1개로 저장한다.
         dataset.save_episode()
         kept_episodes += 1
-        print(f"[{kept_episodes}] Converted: {ep_path}")
+        print(
+            f"[{kept_episodes}] Converted: {ep_path} "
+            f"(kept_frames={kept_in_episode}, total_kept={total_kept_frames})"
+        )
 
     # 중요: finalize()가 parquet writer를 닫아 footer 메타데이터를 기록한다.
     # 이 호출이 없으면 데이터셋이 정상 로드되지 않는다.

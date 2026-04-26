@@ -54,6 +54,16 @@
 - `50_mark7_preset_test.sh open|grasp|press|release`
   - 예: `./run_scripts/50_mark7_preset_test.sh press`
 
+### 진단/개선 (파이펫 오프셋)
+
+- `60_check_preprocess_alignment.sh [train_config] [img_h] [img_w] [action_delta_scale]`
+  - 학습/추론 전처리(해상도, repo_id, delta scale) 정합 검사
+  - 예: `./run_scripts/60_check_preprocess_alignment.sh ai/models/26.04.20_half_data/checkpoints/last/pretrained_model/train_config.json 360 480 8.0`
+
+- `61_offline_error_split.sh [episodes_dir] [action_delta_scale] [max_delta_rad]`
+  - 오프라인으로 제어 스케일 포화율(clipping) 진단
+  - 예: `./run_scripts/61_offline_error_split.sh ros2_ws/episodes/success 8.0 0.25`
+
 ## 추천 실행 순서 예시
 
 ### 실제 데이터 수집
