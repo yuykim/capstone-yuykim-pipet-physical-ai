@@ -609,3 +609,84 @@ python -c "import ast, pathlib; files=[...]; [ast.parse(pathlib.Path(f).read_tex
 - 이 submodule dirty 상태는 `3d1e4f0 feat: add Cartesian teleop and run docs` 커밋에 포함하지 않았다.
 - `indy7_ros2`를 최신 브랜치로 새로 pull해 submodule pointer를 올리는 작업은 나중에 별도 커밋으로 진행한다.
 - 이유: `indy_driver`, `indy_description`, `indy_moveit` 변경은 `/joint_states`, `indy_srv`, controller topic, MoveIt Servo 설정에 영향을 줄 수 있어 데이터 수집 smoke test와 함께 검증해야 한다.
+
+---
+
+## 26.04.20 half data 변환·학습·추론 점검 (26.04.25)
+
+### 1) 데이터 검증 및 변환
+
+- 입력 폴더: `ros2_ws/episodes/success/26.04.20 half data`
+- 총 `10`개 NPZ(약 `2.7GB`)를 전수 검증:
+  - 필수 키 존재, 배열 길이 일치, `success=True`, 압축 손상 없음
+  - 에피소드 길이 약 `15.8~20.6s`, 수집률 약 `17.6~20Hz`
+- LeRobot v3 변환 완료:
+  - 출력: `ai/datasets/26.04.20_half_data`
+  - `repo_id`: `pipet_26_04_20_half_data`
+  - 로드 스모크 테스트: `episodes=10`, `frames=3448`, `fps=20`
+
+### 2) 학습 실행/결과
+
+- 학습 스크립트 추가: `ai/lerobot/train_26_04_20_half_data.sh`
+  - `steps=100000`, `save_freq=10000`
+  - `PYTHONUNBUFFERED=1` 및 `tee`로 `ai/logs`에 로그 저장
+- 학습 완료:
+  - 체크포인트 `010000`~`100000`, `last -> 100000`
+  - 출력 경로: `ai/models/26.04.20_half_data/checkpoints/`
+- 요약 문서 저장: `ai/logs/train_26_04_20_half_data_summary.md`
+
+### 3) 추론 전 하드웨어 점검
+
+- Indy7:
+  - `ping 192.168.1.10` 정상
+  - `nc -zv 192.168.1.10 20001` 정상
+- Mark7:
+  - 초기에 `/dev/ttyACM0` 기준으로 실행 시 포트 열기 실패
+  - 실제 포트가 `/dev/ttyACM1`로 변경된 것을 확인 후 `mark7_port:=/dev/ttyACM1`로 해결
+- RealSense 2대:
+  - 일시적 USB 재열거/`VIDIOC_QBUF` 오류 및 `No such device` 발생
+  - 재기동 후 `Publisher count=1`(wrist/overhead), 약 `29~30Hz` 스트림 확인
+
+### 4) 현재 운영 메모
+
+- 추론 기본 실행 시 Mark7 포트 인자는 반드시 실제 장치 노드로 지정:
+  - 예) `mark7_port:=/dev/ttyACM1`
+- `Ctrl+C` 후 Indy 직접교시 모드가 남을 수 있음:
+  - OFF: `ros2 service call /indy_srv indy_interfaces/srv/IndyService "{data: 10}"`
+  - 관절 텔레옵 복귀(추론용): `ros2 service call /indy_srv indy_interfaces/srv/IndyService "{data: 6}"`
+- 카메라가 토픽명만 있고 `Publisher count: 0`이면 스트림 실패 상태이므로 재기동 후 재확인 필요.
+
+### 5) 파이펫 위치 인식 실패 이슈 및 보완 아이디어(초안)
+
+#### 배경
+
+- 현재 추론에서 "파이펫 위치를 안정적으로 못 잡는" 구간이 반복적으로 관찰됨.
+- 데이터 추가 수집은 계속 진행하되, 데이터 양만으로 해결되지 않을 가능성(구도/조명/가림/단계 판단)이 있어 보조 전략을 병행 검토.
+
+#### 보완 방향
+
+1) **고수준 인식/초기화 보조 (LLM/VLM/API)**
+- 목적: 저수준 제어를 대체하지 않고, 저속 주기(예: 0.5~1Hz)로 장면 이해를 제공
+- 출력 예시:
+  - `pipette_direction`: left/right/up/down/center/not_visible
+  - `stage`: search/approach/align/grasp/press/release/done
+  - `confidence`: 0.0~1.0
+- 적용 원칙: 출력은 직접 모터 명령이 아니라 "모드 전환 신호"로만 사용
+
+2) **재시도/리커버리 트리거**
+- 조건 예시: 파이펫 미가시 상태 지속, 그리퍼 플리킹, 장시간 stage 정체
+- 액션 예시: 재탐색(search), 후진 후 재접근(backoff+re-approach), 안전 정지
+
+3) **데이터 품질 향상 자동화**
+- 수집 영상/에피소드 자동 태깅:
+  - 파이펫 가시성, 가림 정도, 난이도, 조명 품질
+- 활용: 저품질 샘플 제외, hard 샘플 선별, 재수집 우선순위 지정
+
+#### 운영 관점 결론(현시점)
+
+- 메인 제어 루프(20Hz)는 로컬 ACT를 유지하고,
+- LLM/VLM/API는 "고수준 판단 보조"로 결합하는 하이브리드 전략이 유력.
+- 즉시 할 일:
+  - 데이터 추가 수집(다양한 파이펫 위치/조명/배경),
+  - 보조 판단 스키마(JSON) 정의,
+  - 오프라인 태깅 파이프라인(에피소드 난이도/가시성 점수화)부터 적용.
