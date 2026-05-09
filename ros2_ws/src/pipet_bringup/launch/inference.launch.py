@@ -92,6 +92,31 @@ def generate_launch_description():
         default_value="1.0",
         description="모델 관절 델타(6)에 곱함 — 출력이 너무 작으면 5~15 등으로 조절(안전·max_delta_rad와 함께 튜닝)",
     )
+    grasp_delay_steps_arg = DeclareLaunchArgument(
+        "grasp_delay_steps",
+        default_value="0",
+        description="첫 grasp 예측 후 이 tick 수만큼 그리퍼를 늦게 닫음. 20Hz에서 10~20은 0.5~1.0초.",
+    )
+    pre_grasp_delta_scale_arg = DeclareLaunchArgument(
+        "pre_grasp_delta_scale",
+        default_value="1.0",
+        description="grasp delay 중에만 모델 관절 델타를 추가 배율 적용. 전체 action_delta_scale보다 보수적인 late-grasp 보정.",
+    )
+    grasp_confirm_steps_arg = DeclareLaunchArgument(
+        "grasp_confirm_steps",
+        default_value="0",
+        description="grasp 예측이 이 tick 수만큼 연속 유지되어야 닫음. 0이면 delta 조건만 사용.",
+    )
+    grasp_max_delta_norm_arg = DeclareLaunchArgument(
+        "grasp_max_delta_norm",
+        default_value="0.0",
+        description="grasp 실행 허용 최대 관절 delta norm. 0이면 비활성. 이동 중 grasp 방지용.",
+    )
+    max_joint_speed_arg = DeclareLaunchArgument(
+        "max_joint_speed_rad_s",
+        default_value="0.0",
+        description="관절 속도 상한(rad/s). 0이면 비활성. 활성 시 tick당 delta를 speed*dt로 추가 제한.",
+    )
     image_target_height_arg = DeclareLaunchArgument(
         "image_target_height",
         default_value="0",
@@ -101,6 +126,36 @@ def generate_launch_description():
         "image_target_width",
         default_value="0",
         description="0이면 리사이즈 안 함. 360 학습이면 480",
+    )
+    state_target_dim_arg = DeclareLaunchArgument(
+        "state_target_dim",
+        default_value="0",
+        description="observation.state 차원 강제(0=기본 18). extended 모델(26) 추론 시 26 권장.",
+    )
+    use_tf_ee_pose_arg = DeclareLaunchArgument(
+        "use_tf_ee_pose",
+        default_value="true",
+        description="state 26D일 때 ee_pose(7)를 TF로 채움. false면 fk_urdf_path Pinocchio만.",
+    )
+    ee_tf_parent_frame_arg = DeclareLaunchArgument(
+        "ee_tf_parent_frame",
+        default_value="world",
+        description="TCP pose TF parent (lookup: parent <- child).",
+    )
+    ee_tf_child_frame_arg = DeclareLaunchArgument(
+        "ee_tf_child_frame",
+        default_value="tcp",
+        description="TCP link frame id (Neuromeka robot_state_publisher 기본 tcp).",
+    )
+    fk_urdf_path_arg = DeclareLaunchArgument(
+        "fk_urdf_path",
+        default_value="",
+        description="Indy7 URDF 절대경로: TF 실패 시 Pinocchio FK fallback (변환 시 --fk_urdf와 동일 파일 권장).",
+    )
+    fk_tcp_frame_arg = DeclareLaunchArgument("fk_tcp_frame", default_value="tcp")
+    fk_joint_names_arg = DeclareLaunchArgument(
+        "fk_joint_names",
+        default_value="joint0,joint1,joint2,joint3,joint4,joint5",
     )
 
     indy_driver_launch = IncludeLaunchDescription(
@@ -217,12 +272,30 @@ def generate_launch_description():
                     LaunchConfiguration("indy_prep_joint_teleop_code"), value_type=int
                 ),
                 "action_delta_scale": LaunchConfiguration("action_delta_scale"),
+                "grasp_delay_steps": ParameterValue(
+                    LaunchConfiguration("grasp_delay_steps"), value_type=int
+                ),
+                "pre_grasp_delta_scale": LaunchConfiguration("pre_grasp_delta_scale"),
+                "grasp_confirm_steps": ParameterValue(
+                    LaunchConfiguration("grasp_confirm_steps"), value_type=int
+                ),
+                "grasp_max_delta_norm": LaunchConfiguration("grasp_max_delta_norm"),
+                "max_joint_speed_rad_s": LaunchConfiguration("max_joint_speed_rad_s"),
                 "image_target_height": ParameterValue(
                     LaunchConfiguration("image_target_height"), value_type=int
                 ),
                 "image_target_width": ParameterValue(
                     LaunchConfiguration("image_target_width"), value_type=int
                 ),
+                "state_target_dim": ParameterValue(
+                    LaunchConfiguration("state_target_dim"), value_type=int
+                ),
+                "use_tf_ee_pose": ParameterValue(LaunchConfiguration("use_tf_ee_pose"), value_type=bool),
+                "ee_tf_parent_frame": LaunchConfiguration("ee_tf_parent_frame"),
+                "ee_tf_child_frame": LaunchConfiguration("ee_tf_child_frame"),
+                "fk_urdf_path": LaunchConfiguration("fk_urdf_path"),
+                "fk_tcp_frame": LaunchConfiguration("fk_tcp_frame"),
+                "fk_joint_names": LaunchConfiguration("fk_joint_names"),
             }
         ],
     )
@@ -248,8 +321,20 @@ def generate_launch_description():
             indy_prep_joint_teleop_arg,
             indy_prep_joint_teleop_code_arg,
             action_delta_scale_arg,
+            grasp_delay_steps_arg,
+            pre_grasp_delta_scale_arg,
+            grasp_confirm_steps_arg,
+            grasp_max_delta_norm_arg,
+            max_joint_speed_arg,
             image_target_height_arg,
             image_target_width_arg,
+            state_target_dim_arg,
+            use_tf_ee_pose_arg,
+            ee_tf_parent_frame_arg,
+            ee_tf_child_frame_arg,
+            fk_urdf_path_arg,
+            fk_tcp_frame_arg,
+            fk_joint_names_arg,
             indy_driver_launch,
             mark7_driver_launch,
             grip_preset_node,

@@ -12,22 +12,28 @@ ROS Humble은 Python 3.10, LeRobot 0.5.x는 Python 3.12+ 이라 기본은 ZMQ �
   터미널 B:
     ros2 launch pipet_bringup inference.launch.py indy_ip:=192.168.1.10 autonomy_enabled:=true
 
-관측: /joint_states 6축 + 손목/오버헤드 RGB. 액션: delta_q(6) + gripper 0~4.
+관측: /joint_states 6축 + 손목/오버헤드 RGB(+depth). 액션: delta_q(6) + gripper 0~4.
+  state_target_dim=26(extended)이면 TF(world<-tcp)와 마지막 그리퍼 명령으로 observation.state를 채움
+  (변환 시 --fk_urdf와 동일 URDF의 fk_urdf_path를 주면 TF 실패 시 Pinocchio FK).
 
 안전: 기본 autonomy_enabled=false. dry_run=true 로 명령 없이 로그만.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import threading
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
 import numpy as np
 import rclpy
+import tf2_ros
 from builtin_interfaces.msg import Duration
 from cv_bridge import CvBridge
+from rclpy.duration import Duration as RclDuration
 from rclpy.node import Node
+from rclpy.time import Time
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image, JointState
 from std_srvs.srv import Trigger
@@ -56,6 +62,30 @@ def _joint_vec_to_six(seq) -> List[float]:
     return xs[:6]
 
 
+def _depth_to_u8_rgb(depth_hw: np.ndarray) -> np.ndarray:
+    """
+    Convert depth image (uint16/mm) to pseudo-RGB uint8.
+    Matches conversion-time behavior: per-frame robust scaling over valid pixels.
+    """
+    d = np.asarray(depth_hw)
+    if d.ndim != 2:
+        raise ValueError(f"Depth image must be 2D, got {d.shape}")
+    d = d.astype(np.float32, copy=False)
+    valid = d > 0
+    out_u8 = np.zeros_like(d, dtype=np.uint8)
+    if np.any(valid):
+        v = d[valid]
+        lo = float(np.percentile(v, 1.0))
+        hi = float(np.percentile(v, 99.0))
+        if hi <= lo:
+            hi = lo + 1.0
+        scaled = (d - lo) / (hi - lo)
+        scaled = np.clip(scaled, 0.0, 1.0)
+        out_u8 = (scaled * 255.0).astype(np.uint8)
+        out_u8[~valid] = 0
+    return np.repeat(out_u8[..., None], 3, axis=2)
+
+
 # NPZ / convert.py 와 동일한 그리퍼 디스크리트 코드
 GRIP_HOLD = 0
 GRIP_GRASP = 1
@@ -80,11 +110,44 @@ class InferenceNode(Node):
         self.declare_parameter("trajectory_horizon_sec", 0.12)
         self.declare_parameter("max_delta_rad", 0.25)
         self.declare_parameter(
+            "max_joint_speed_rad_s",
+            0.0,
+        )
+        self.declare_parameter(
             "action_delta_scale",
             1.0,
         )
+        self.declare_parameter(
+            "grasp_delay_steps",
+            0,
+        )
+        self.declare_parameter(
+            "pre_grasp_delta_scale",
+            1.0,
+        )
+        self.declare_parameter(
+            "grasp_confirm_steps",
+            0,
+        )
+        self.declare_parameter(
+            "grasp_max_delta_norm",
+            0.0,
+        )
         self.declare_parameter("image_target_height", 0)
         self.declare_parameter("image_target_width", 0)
+        self.declare_parameter(
+            "state_target_dim",
+            0,
+        )
+        self.declare_parameter("use_tf_ee_pose", True)
+        self.declare_parameter("ee_tf_parent_frame", "world")
+        self.declare_parameter("ee_tf_child_frame", "tcp")
+        self.declare_parameter("fk_urdf_path", "")
+        self.declare_parameter("fk_tcp_frame", "tcp")
+        self.declare_parameter(
+            "fk_joint_names",
+            "joint0,joint1,joint2,joint3,joint4,joint5",
+        )
         self.declare_parameter("dry_run", False)
         self.declare_parameter("autonomy_enabled", False)
         self.declare_parameter("use_zmq_sidecar", True)
@@ -103,14 +166,37 @@ class InferenceNode(Node):
         trajectory_topic = self.get_parameter("trajectory_topic").get_parameter_value().string_value
         traj_sec = self.get_parameter("trajectory_horizon_sec").get_parameter_value().double_value
         self._max_delta = float(self.get_parameter("max_delta_rad").get_parameter_value().double_value)
+        self._max_joint_speed = float(
+            self.get_parameter("max_joint_speed_rad_s").get_parameter_value().double_value
+        )
+        self._period_sec = 1.0 / max(1.0, float(inference_hz))
         self._action_delta_scale = float(
             self.get_parameter("action_delta_scale").get_parameter_value().double_value
         )
         if self._action_delta_scale <= 0.0:
             self.get_logger().warn("action_delta_scale<=0 이므로 1.0으로 대체합니다.")
             self._action_delta_scale = 1.0
+        self._grasp_delay_steps = max(
+            0,
+            int(self.get_parameter("grasp_delay_steps").get_parameter_value().integer_value),
+        )
+        self._pre_grasp_delta_scale = float(
+            self.get_parameter("pre_grasp_delta_scale").get_parameter_value().double_value
+        )
+        if self._pre_grasp_delta_scale <= 0.0:
+            self.get_logger().warn("pre_grasp_delta_scale<=0 이므로 1.0으로 대체합니다.")
+            self._pre_grasp_delta_scale = 1.0
+        self._grasp_confirm_steps = max(
+            0,
+            int(self.get_parameter("grasp_confirm_steps").get_parameter_value().integer_value),
+        )
+        self._grasp_max_delta_norm = max(
+            0.0,
+            float(self.get_parameter("grasp_max_delta_norm").get_parameter_value().double_value),
+        )
         img_th = int(self.get_parameter("image_target_height").get_parameter_value().integer_value)
         img_tw = int(self.get_parameter("image_target_width").get_parameter_value().integer_value)
+        self._state_target_dim = int(self.get_parameter("state_target_dim").get_parameter_value().integer_value)
         self._img_resize_hw: Optional[tuple[int, int]] = None
         self._cv2_resize = None
         if img_th > 0 and img_tw > 0:
@@ -133,7 +219,18 @@ class InferenceNode(Node):
         self._joint_names: List[str] = []
         self._obs_lock = threading.Lock()
         self._latest_obs: Optional[dict[str, np.ndarray]] = None
-        self._last_grip_cmd: Optional[int] = None
+        # 이산 그리퍼 모드(0~4). 피드백 없이도 학습 시 gripper_state 슬롯과 맞추기 위해 유지.
+        self._last_grip_cmd: int = GRIP_HOLD
+        self._pending_grasp_ticks = 0
+        self._grasp_confirm_count = 0
+        self._grasp_delay_done = False
+        self._tf_buffer: Optional[Any] = None
+        self._tf_listener: Optional[Any] = None
+        self._fk: Optional[Any] = None
+        self._use_tf_ee = False
+        self._ee_tf_parent = "world"
+        self._ee_tf_child = "tcp"
+        self._ee_warn_last_ns = 0
         self._tick_count = 0
         self._indy_prep_done = False
         self._indy_prep_pending = False
@@ -198,16 +295,80 @@ class InferenceNode(Node):
                 self.get_logger().error(f"모델 로드 실패: {e}")
                 return
 
+        if self._state_target_dim >= 26:
+            self._use_tf_ee = bool(
+                self.get_parameter("use_tf_ee_pose").get_parameter_value().bool_value
+            )
+            self._ee_tf_parent = (
+                self.get_parameter("ee_tf_parent_frame").get_parameter_value().string_value.strip()
+                or "world"
+            )
+            self._ee_tf_child = (
+                self.get_parameter("ee_tf_child_frame").get_parameter_value().string_value.strip() or "tcp"
+            )
+            fk_path = self.get_parameter("fk_urdf_path").get_parameter_value().string_value.strip()
+            fk_tcp = (
+                self.get_parameter("fk_tcp_frame").get_parameter_value().string_value.strip() or "tcp"
+            )
+            fk_jn = self.get_parameter("fk_joint_names").get_parameter_value().string_value
+            jn_list = [x.strip() for x in fk_jn.split(",") if x.strip()]
+
+            if self._use_tf_ee:
+                self._tf_buffer = tf2_ros.Buffer(cache_time=RclDuration(seconds=60.0))
+                self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self, spin_thread=True)
+                self.get_logger().info(
+                    f"ee_pose(26D): TF lookup {self._ee_tf_parent} <- {self._ee_tf_child} "
+                    f"(Pinocchio fallback={'yes' if fk_path else 'no'})"
+                )
+            if fk_path:
+                fk_mod_path = (
+                    Path(__file__).resolve().parents[3]
+                    / "ai"
+                    / "data_conversion"
+                    / "npz_to_lerobot"
+                    / "indy7_tcp_fk.py"
+                )
+                if not fk_mod_path.is_file():
+                    self.get_logger().error(f"indy7_tcp_fk.py 없음: {fk_mod_path}")
+                else:
+                    try:
+                        spec = importlib.util.spec_from_file_location("indy7_tcp_fk", str(fk_mod_path))
+                        if spec is None or spec.loader is None:
+                            raise RuntimeError("importlib spec failed")
+                        mod = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(mod)
+                        self._fk = mod.Indy7TcpFk(fk_path, tcp_frame=fk_tcp, joint_names=jn_list)
+                        self.get_logger().info(f"ee_pose: Pinocchio FK OK ({fk_path})")
+                    except Exception as e:
+                        self.get_logger().error(f"Pinocchio FK 초기화 실패: {e}")
+            if not self._use_tf_ee and self._fk is None:
+                self.get_logger().warn(
+                    "state_target_dim>=26 인데 use_tf_ee_pose=false 이고 fk_urdf_path가 비어 있음. "
+                    "ee_pose(7)는 0으로 남습니다."
+                )
+
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self.joint_sub = message_filters.Subscriber(self, JointState, "/joint_states")
         self.wrist_rgb_sub = message_filters.Subscriber(
             self, Image, "/wrist_camera/camera/color/image_raw"
         )
+        self.wrist_depth_sub = message_filters.Subscriber(
+            self, Image, "/wrist_camera/camera/aligned_depth_to_color/image_raw"
+        )
         self.overhead_rgb_sub = message_filters.Subscriber(
             self, Image, "/overhead_camera/camera/color/image_raw"
         )
+        self.overhead_depth_sub = message_filters.Subscriber(
+            self, Image, "/overhead_camera/camera/aligned_depth_to_color/image_raw"
+        )
         self.sync = message_filters.ApproximateTimeSynchronizer(
-            [self.joint_sub, self.wrist_rgb_sub, self.overhead_rgb_sub],
+            [
+                self.joint_sub,
+                self.wrist_rgb_sub,
+                self.wrist_depth_sub,
+                self.overhead_rgb_sub,
+                self.overhead_depth_sub,
+            ],
             queue_size=10,
             slop=sync_slop,
         )
@@ -220,16 +381,43 @@ class InferenceNode(Node):
         self.gripper_release = self.create_client(Trigger, "/gripper/release")
 
         self._traj_sec = max(0.05, float(traj_sec))
-        period = 1.0 / max(1.0, inference_hz)
-        self.create_timer(period, self._inference_tick)
+        self.create_timer(self._period_sec, self._inference_tick)
 
-        extra = f"action_delta_scale={self._action_delta_scale}"
+        extra = (
+            f"action_delta_scale={self._action_delta_scale} | "
+            f"grasp_delay_steps={self._grasp_delay_steps} | "
+            f"pre_grasp_delta_scale={self._pre_grasp_delta_scale} | "
+            f"grasp_confirm_steps={self._grasp_confirm_steps} | "
+            f"grasp_max_delta_norm={self._grasp_max_delta_norm}"
+        )
         if self._img_resize_hw is not None:
             extra += f" | image_resize={self._img_resize_hw[0]}x{self._img_resize_hw[1]}"
         self.get_logger().info(
             f"추론 {inference_hz}Hz | zmq={use_zmq} | autonomy_enabled={self._autonomy_enabled} | "
             f"dry_run={self._dry_run} | trajectory_topic={trajectory_topic} | {extra}"
         )
+
+    def _lookup_ee_pose7(self, q: np.ndarray) -> Optional[np.ndarray]:
+        """TCP pose [x,y,z,qx,qy,qz,qw] in parent frame; TF 우선, 실패 시 Pinocchio FK."""
+        if self._tf_buffer is not None and self._use_tf_ee:
+            try:
+                tfm = self._tf_buffer.lookup_transform(
+                    self._ee_tf_parent,
+                    self._ee_tf_child,
+                    Time(),
+                    timeout=RclDuration(seconds=0.05),
+                )
+                tr = tfm.transform.translation
+                rr = tfm.transform.rotation
+                return np.array([tr.x, tr.y, tr.z, rr.x, rr.y, rr.z, rr.w], dtype=np.float32)
+            except Exception:
+                pass
+        if self._fk is not None:
+            try:
+                return self._fk.compute(np.asarray(q, dtype=np.float64))
+            except Exception:
+                pass
+        return None
 
     def _resize_rgb_if_needed(self, img: np.ndarray) -> np.ndarray:
         if self._img_resize_hw is None or self._cv2_resize is None:
@@ -239,7 +427,14 @@ class InferenceNode(Node):
             return img
         return self._cv2_resize.resize(img, (tw, th), interpolation=self._cv2_resize.INTER_AREA)
 
-    def _sync_callback(self, joint_msg: JointState, wrist_rgb_msg: Image, overhead_rgb_msg: Image) -> None:
+    def _sync_callback(
+        self,
+        joint_msg: JointState,
+        wrist_rgb_msg: Image,
+        wrist_depth_msg: Image,
+        overhead_rgb_msg: Image,
+        overhead_depth_msg: Image,
+    ) -> None:
         if len(joint_msg.name) >= 6:
             self._joint_names = list(joint_msg.name[:6])
         elif not self._joint_names:
@@ -248,21 +443,50 @@ class InferenceNode(Node):
         try:
             wrist_rgb = self._cv_bridge.imgmsg_to_cv2(wrist_rgb_msg, desired_encoding="rgb8")
             overhead_rgb = self._cv_bridge.imgmsg_to_cv2(overhead_rgb_msg, desired_encoding="rgb8")
+            wrist_depth = self._cv_bridge.imgmsg_to_cv2(wrist_depth_msg, desired_encoding="passthrough")
+            overhead_depth = self._cv_bridge.imgmsg_to_cv2(overhead_depth_msg, desired_encoding="passthrough")
         except Exception as e:
             self.get_logger().error(f"이미지 변환 실패: {e}")
             return
 
         wrist_rgb = self._resize_rgb_if_needed(wrist_rgb)
         overhead_rgb = self._resize_rgb_if_needed(overhead_rgb)
+        wrist_depth_rgb = self._resize_rgb_if_needed(_depth_to_u8_rgb(wrist_depth))
+        overhead_depth_rgb = self._resize_rgb_if_needed(_depth_to_u8_rgb(overhead_depth))
 
         q = np.array(_joint_vec_to_six(joint_msg.position), dtype=np.float32)
         dq = np.array(_joint_vec_to_six(joint_msg.velocity), dtype=np.float32)
         tau = np.array(_joint_vec_to_six(joint_msg.effort), dtype=np.float32)
         state_vec = np.concatenate([q, dq, tau], axis=0)
+        if self._state_target_dim > 0:
+            cur_dim = int(state_vec.shape[0])
+            if self._state_target_dim > cur_dim:
+                pad = np.zeros((self._state_target_dim - cur_dim,), dtype=np.float32)
+                state_vec = np.concatenate([state_vec, pad], axis=0)
+            elif self._state_target_dim < cur_dim:
+                state_vec = state_vec[: self._state_target_dim]
+        # convert.py extended: 18 + ee_pose(7) + gripper_state(1) == 26
+        if self._state_target_dim >= 26 and int(state_vec.shape[0]) >= 26:
+            ee7 = self._lookup_ee_pose7(q)
+            if ee7 is not None:
+                state_vec[18:25] = ee7
+            else:
+                now_ns = self.get_clock().now().nanoseconds
+                if now_ns - self._ee_warn_last_ns > 3_000_000_000:
+                    self._ee_warn_last_ns = now_ns
+                    self.get_logger().warn(
+                        "ee_pose(7)를 TF 또는 Pinocchio로 얻지 못했습니다. "
+                        "ee_tf_parent_frame/ee_tf_child_frame, fk_urdf_path, pinocchio 설치를 확인하세요."
+                    )
+            state_vec[25] = float(self._last_grip_cmd)
+        elif int(state_vec.shape[0]) > 18:
+            state_vec[-1] = float(self._last_grip_cmd)
 
         obs = {
             "observation.images.front": np.ascontiguousarray(wrist_rgb),
+            "observation.images.front_depth": np.ascontiguousarray(wrist_depth_rgb),
             "observation.images.overhead": np.ascontiguousarray(overhead_rgb),
+            "observation.images.overhead_depth": np.ascontiguousarray(overhead_depth_rgb),
             "observation.state": state_vec,
         }
         with self._obs_lock:
@@ -287,10 +511,24 @@ class InferenceNode(Node):
             self.get_logger().warn(f"액션 차원 부족: {action.shape}")
             return
 
-        raw6 = action[:6].astype(np.float64) * self._action_delta_scale
-        delta = np.clip(raw6, -self._max_delta, self._max_delta)
+        raw6_base = action[:6].astype(np.float64) * self._action_delta_scale
+        gate_delta = np.clip(raw6_base, -self._max_delta, self._max_delta)
+        if self._max_joint_speed > 0.0:
+            speed_delta_limit = float(self._max_joint_speed) * float(self._period_sec)
+            gate_delta = np.clip(gate_delta, -speed_delta_limit, speed_delta_limit)
+        gate_delta_norm = float(np.linalg.norm(gate_delta))
+
         g_raw = float(action[6])
-        g_cmd = int(np.clip(np.round(g_raw), 0, 4))
+        raw_g_cmd = int(np.clip(np.round(g_raw), 0, 4))
+        g_cmd, grasp_gate_active = self._gate_gripper_cmd(raw_g_cmd, gate_delta_norm)
+
+        raw6 = raw6_base
+        if grasp_gate_active:
+            raw6 = raw6 * self._pre_grasp_delta_scale
+        delta = np.clip(raw6, -self._max_delta, self._max_delta)
+        if self._max_joint_speed > 0.0:
+            speed_delta_limit = float(self._max_joint_speed) * float(self._period_sec)
+            delta = np.clip(delta, -speed_delta_limit, speed_delta_limit)
 
         q_now = obs["observation.state"][:6].astype(np.float64)
         q_tgt = q_now + delta
@@ -298,7 +536,11 @@ class InferenceNode(Node):
         if self._tick_count % 40 == 0:
             self.get_logger().info(
                 f"delta_norm={float(np.linalg.norm(delta)):.4f} "
-                f"(scale={self._action_delta_scale}) grip_cmd={g_cmd} autonomy={self._autonomy_enabled}"
+                f"(scale={self._action_delta_scale}) grip_raw={g_raw:.2f} "
+                f"raw_grip_cmd={raw_g_cmd} grip_cmd={g_cmd} "
+                f"grasp_pending={self._pending_grasp_ticks} "
+                f"grasp_confirm={self._grasp_confirm_count}/{self._grasp_confirm_steps} "
+                f"autonomy={self._autonomy_enabled}"
             )
 
         if self._dry_run or not self._autonomy_enabled:
@@ -339,6 +581,70 @@ class InferenceNode(Node):
         self._publish_joint_targets(q_tgt)
         self._maybe_gripper_service(g_cmd)
 
+    def _gate_gripper_cmd(self, raw_cmd: int, delta_norm: float) -> tuple[int, bool]:
+        """Hold grasp until the command is stable and the arm is near a settled target."""
+        if (
+            self._grasp_delay_steps <= 0
+            and self._grasp_confirm_steps <= 0
+            and self._grasp_max_delta_norm <= 0.0
+        ):
+            return raw_cmd, False
+        if self._last_grip_cmd == GRIP_GRASP:
+            return raw_cmd, False
+
+        if raw_cmd != GRIP_GRASP:
+            if self._pending_grasp_ticks > 0 or self._grasp_confirm_count > 0:
+                self.get_logger().info(
+                    f"grasp gate 취소: raw_grip_cmd={raw_cmd} "
+                    f"pending={self._pending_grasp_ticks} "
+                    f"confirm={self._grasp_confirm_count}/{self._grasp_confirm_steps}"
+                )
+            self._pending_grasp_ticks = 0
+            self._grasp_confirm_count = 0
+            self._grasp_delay_done = False
+            return raw_cmd, False
+
+        if self._pending_grasp_ticks > 0:
+            self._pending_grasp_ticks -= 1
+            if self._pending_grasp_ticks <= 0:
+                self._grasp_delay_done = True
+                self.get_logger().info("grasp delay 완료: 안정 조건 확인 시작")
+            return self._last_grip_cmd, True
+
+        if (
+            self._pending_grasp_ticks == 0
+            and self._grasp_confirm_count == 0
+            and self._grasp_delay_steps > 0
+            and not self._grasp_delay_done
+        ):
+            self._pending_grasp_ticks = self._grasp_delay_steps
+            self.get_logger().info(
+                f"grasp delay 시작: {self._grasp_delay_steps} ticks 동안 그리퍼 hold"
+            )
+            return self._last_grip_cmd, True
+
+        if self._grasp_max_delta_norm > 0.0 and delta_norm > self._grasp_max_delta_norm:
+            if self._grasp_confirm_count > 0:
+                self.get_logger().info(
+                    f"grasp gate 리셋: 아직 팔 이동 중 "
+                    f"delta_norm={delta_norm:.4f} > {self._grasp_max_delta_norm:.4f}"
+                )
+            self._grasp_confirm_count = 0
+            return self._last_grip_cmd, True
+
+        self._grasp_confirm_count += 1
+        required = max(1, self._grasp_confirm_steps)
+        if self._grasp_confirm_count >= required:
+            self.get_logger().info(
+                f"grasp gate 통과: confirm={self._grasp_confirm_count}/{required}, "
+                f"delta_norm={delta_norm:.4f}"
+            )
+            self._grasp_confirm_count = 0
+            self._grasp_delay_done = False
+            return GRIP_GRASP, False
+
+        return self._last_grip_cmd, True
+
     def _publish_joint_targets(self, positions: np.ndarray) -> None:
         msg = JointTrajectory()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -353,8 +659,8 @@ class InferenceNode(Node):
     def _maybe_gripper_service(self, cmd: int) -> None:
         if cmd == self._last_grip_cmd:
             return
-        self._last_grip_cmd = cmd
         if cmd == GRIP_HOLD:
+            self._last_grip_cmd = cmd
             return
         clients = {
             GRIP_GRASP: self.gripper_grasp,
@@ -369,7 +675,17 @@ class InferenceNode(Node):
             self.get_logger().warn(f"그리퍼 서비스 대기 중: {cli.srv_name}")
             return
         fut = cli.call_async(Trigger.Request())
-        fut.add_done_callback(lambda _f: None)
+        self._last_grip_cmd = cmd
+
+        def _on_gripper_done(f) -> None:
+            try:
+                r = f.result()
+                if not r.success:
+                    self.get_logger().warn(f"{cli.srv_name} 실패: {r.message}")
+            except Exception as ex:
+                self.get_logger().warn(f"{cli.srv_name} 호출 예외: {ex}")
+
+        fut.add_done_callback(_on_gripper_done)
 
 
 def main(args=None) -> None:

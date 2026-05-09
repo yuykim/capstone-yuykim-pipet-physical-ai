@@ -26,9 +26,10 @@
 
 ### 학습
 
-- `20_train_lerobot.sh <episodes_dir> <dataset_output_dir> <dataset_repo_id> <job_name> [device]`
+- `20_train_lerobot.sh <episodes_dir> <dataset_output_dir> <dataset_repo_id> <job_name> [device] [run_lerobot_train.py 추가 인자...]`
   - 기본값 사용 시: `./run_scripts/20_train_lerobot.sh`
   - 예: `./run_scripts/20_train_lerobot.sh episodes ai/datasets/pipet_dataset pipet_dataset act_pipet cuda`
+  - extended(26D)+ee FK+depth: 6번째 인자부터 `run_lerobot_train.py`에 그대로 전달 (예: `--state_profile extended --fk_urdf /ABS/indy7.urdf --include_depth`)
 
 - `21_train_26_04_20_half_data.sh`
   - 고정 레시피(`ai/lerobot/train_26_04_20_half_data.sh`) 실행
@@ -48,8 +49,10 @@
 
 ### 추론/테스트
 
-- `40_inference_ros.sh <model_path> [indy_ip] [mark7_port]`
+- `40_inference_ros.sh <model_path> [indy_ip] [mark7_port] [fk_urdf_path] [state_target_dim]`
   - 예: `./run_scripts/40_inference_ros.sh /path/to/model/checkpoints/last 192.168.1.10 /dev/ttyACM1`
+  - extended 모델(26D): `[fk_urdf]`·`[state_target_dim]` 추가 (예: `./run_scripts/40_inference_ros.sh /path/checkpoints/last 192.168.1.10 /dev/ttyACM0 /ABS/indy7.urdf 26`)
+  - grasp gate 보정: 추가 launch 인자로 `grasp_delay_steps:=8 grasp_confirm_steps:=8 grasp_max_delta_norm:=0.008` 등을 전달해, 팔 이동량이 작고 grasp가 연속 예측될 때만 닫게 할 수 있음.
 
 - `50_mark7_preset_test.sh open|grasp|press|release`
   - 예: `./run_scripts/50_mark7_preset_test.sh press`

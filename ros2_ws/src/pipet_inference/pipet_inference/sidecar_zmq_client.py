@@ -35,6 +35,8 @@ class ZmqLerobotClient:
         state = np.ascontiguousarray(observation["observation.state"], dtype=np.float32)
         front = np.ascontiguousarray(observation["observation.images.front"], dtype=np.uint8)
         over = np.ascontiguousarray(observation["observation.images.overhead"], dtype=np.uint8)
+        front_depth = observation.get("observation.images.front_depth")
+        over_depth = observation.get("observation.images.overhead_depth")
 
         header: dict[str, Any] = {
             "fmt": FMT_V2,
@@ -42,6 +44,13 @@ class ZmqLerobotClient:
             "front_shape": list(front.shape),
             "over_shape": list(over.shape),
         }
+        with_depth = front_depth is not None and over_depth is not None
+        if with_depth:
+            front_depth = np.ascontiguousarray(front_depth, dtype=np.uint8)
+            over_depth = np.ascontiguousarray(over_depth, dtype=np.uint8)
+            header["front_depth_shape"] = list(front_depth.shape)
+            header["over_depth_shape"] = list(over_depth.shape)
+
         b0 = json.dumps(header).encode("utf-8")
         b1 = state.tobytes()
         b2 = front.tobytes()
@@ -56,7 +65,19 @@ class ZmqLerobotClient:
                 f"front {len(b2)}!={exp2}, over {len(b3)}!={exp3}"
             )
 
-        self._sock.send_multipart([b0, b1, b2, b3])
+        if with_depth:
+            b4 = front_depth.tobytes()
+            b5 = over_depth.tobytes()
+            exp4 = int(np.prod(front_depth.shape, dtype=np.int64))
+            exp5 = int(np.prod(over_depth.shape, dtype=np.int64))
+            if len(b4) != exp4 or len(b5) != exp5:
+                raise ValueError(
+                    f"observation buffer size mismatch: "
+                    f"front_depth {len(b4)}!={exp4}, over_depth {len(b5)}!={exp5}"
+                )
+            self._sock.send_multipart([b0, b1, b2, b3, b4, b5])
+        else:
+            self._sock.send_multipart([b0, b1, b2, b3])
         parts = self._sock.recv_multipart()
         if not parts:
             raise RuntimeError("empty zmq response")

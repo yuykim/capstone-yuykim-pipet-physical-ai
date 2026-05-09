@@ -92,8 +92,8 @@ def main() -> None:
             _send_err(sock, "legacy pickle obs deprecated; update inference_node")
             continue
 
-        if len(parts) != 4:
-            _send_err(sock, f"expected 4 multipart frames, got {len(parts)}")
+        if len(parts) not in (4, 6):
+            _send_err(sock, f"expected 4 or 6 multipart frames, got {len(parts)}")
             continue
 
         try:
@@ -126,6 +126,27 @@ def main() -> None:
                 "observation.images.front": np.frombuffer(parts[2], dtype=np.uint8).reshape(fs).copy(),
                 "observation.images.overhead": np.frombuffer(parts[3], dtype=np.uint8).reshape(os_).copy(),
             }
+            if len(parts) == 6:
+                fds = tuple(int(x) for x in hdr.get("front_depth_shape", []))
+                ods = tuple(int(x) for x in hdr.get("over_depth_shape", []))
+                if not fds or not ods:
+                    _send_err(sock, "depth frames provided but depth shapes missing in header")
+                    continue
+                n_fd = int(np.prod(fds, dtype=np.int64))
+                n_od = int(np.prod(ods, dtype=np.int64))
+                if len(parts[4]) != n_fd or len(parts[5]) != n_od:
+                    _send_err(
+                        sock,
+                        f"byte len mismatch front_depth {len(parts[4])}!={n_fd}, "
+                        f"over_depth {len(parts[5])}!={n_od}",
+                    )
+                    continue
+                obs["observation.images.front_depth"] = (
+                    np.frombuffer(parts[4], dtype=np.uint8).reshape(fds).copy()
+                )
+                obs["observation.images.overhead_depth"] = (
+                    np.frombuffer(parts[5], dtype=np.uint8).reshape(ods).copy()
+                )
             action = backend.predict(obs)
             a = np.ascontiguousarray(action, dtype=np.float32).reshape(-1)
             if a.size != 7:
