@@ -32,14 +32,21 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 
-def run(cmd: list[str]) -> None:
+def run(
+    cmd: list[str],
+    env: dict[str, str] | None = None,
+    env_overrides: dict[str, str] | None = None,
+) -> None:
+    if env_overrides:
+        print("[env]", " ".join(f"{key}={value}" for key, value in env_overrides.items()))
     print("[cmd]", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, env=env)
 
 
 def main() -> None:
@@ -73,12 +80,59 @@ def main() -> None:
     )
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=40,
+        help="ACT action chunk horizon. Smaller values reduce GPU memory.",
+    )
+    parser.add_argument(
+        "--n_action_steps",
+        type=int,
+        default=None,
+        help="ACT action steps used at inference. Defaults to --chunk_size.",
+    )
+    parser.add_argument(
+        "--use_amp",
+        choices=["true", "false"],
+        default="true",
+        help="Enable mixed precision for policy training.",
+    )
+    parser.add_argument(
         "--num_workers",
         type=int,
         default=None,
         help="DataLoader worker 수. 미지정 시 lerobot 기본(4). 스트리밍+고해상도 이미지는 0이 안전(OOM·worker Killed 방지).",
     )
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--policy_dim_model",
+        type=int,
+        default=None,
+        help="Optional ACT transformer hidden size override, e.g. 256 for lower VRAM.",
+    )
+    parser.add_argument(
+        "--policy_dim_feedforward",
+        type=int,
+        default=None,
+        help="Optional ACT transformer FFN size override, e.g. 1024 for lower VRAM.",
+    )
+    parser.add_argument(
+        "--policy_n_heads",
+        type=int,
+        default=None,
+        help="Optional ACT attention head count override. Must divide dim_model.",
+    )
+    parser.add_argument(
+        "--policy_n_encoder_layers",
+        type=int,
+        default=None,
+        help="Optional ACT encoder layer count override.",
+    )
+    parser.add_argument(
+        "--torch_alloc_conf",
+        default="expandable_segments:True",
+        help="CUDA allocator config for the lerobot-train subprocess. Empty string disables this wrapper default.",
+    )
     parser.add_argument(
         "--image_resize_to",
         default="360x480",
@@ -115,12 +169,30 @@ def main() -> None:
         help="Include depth observations during conversion as additional image features.",
     )
     parser.add_argument(
+        "--fk_urdf",
+        default="",
+        help="Indy7 URDF for extended ee_pose FK when NPZ has no ee_pose (same file as inference fk_urdf_path 권장).",
+    )
+    parser.add_argument("--fk_tcp_frame", default="tcp", help="TCP frame name in URDF.")
+    parser.add_argument(
+        "--fk_joint_names",
+        default="joint0,joint1,joint2,joint3,joint4,joint5",
+        help="Comma-separated URDF joint names matching NPZ joint order.",
+    )
+    parser.add_argument(
         "--convert_log_every_frames",
         type=int,
         default=200,
         help="Conversion progress log interval in frames (0 disables).",
     )
     args = parser.parse_args()
+    n_action_steps = args.n_action_steps if args.n_action_steps is not None else args.chunk_size
+    if n_action_steps > args.chunk_size:
+        parser.error("--n_action_steps must be less than or equal to --chunk_size")
+    dim_model = args.policy_dim_model or 512
+    n_heads = args.policy_n_heads or 8
+    if dim_model % n_heads != 0:
+        parser.error("--policy_n_heads must divide policy dim_model")
 
     repo_root = Path(__file__).resolve().parents[1]
     output_dir = args.output_dir.strip()
@@ -164,6 +236,16 @@ def main() -> None:
         cmd_convert += ["--state_profile", args.state_profile]
         if args.include_depth:
             cmd_convert.append("--include_depth")
+        fk_urdf = str(args.fk_urdf).strip()
+        if fk_urdf:
+            cmd_convert += [
+                "--fk_urdf",
+                fk_urdf,
+                "--fk_tcp_frame",
+                str(args.fk_tcp_frame),
+                "--fk_joint_names",
+                str(args.fk_joint_names),
+            ]
         run(cmd_convert)
 
     # 학습 단계: 로컬 데이터셋은 --dataset.root 로 전달한다.
@@ -193,13 +275,13 @@ def main() -> None:
         "--log_freq",
         str(args.log_freq),
         "--policy.chunk_size",
-        "40",
+        str(args.chunk_size),
         "--policy.n_action_steps",
-        "40",
+        str(n_action_steps),
         "--policy.use_vae",
         "false",
         "--policy.use_amp",
-        "true",
+        args.use_amp,
         "--dataset.use_imagenet_stats",
         "true",
     ]
@@ -209,10 +291,27 @@ def main() -> None:
         cmd_train += ["--dataset.streaming", "true"]
     if args.num_workers is not None:
         cmd_train += ["--num_workers", str(args.num_workers)]
+    if args.policy_dim_model is not None:
+        cmd_train += ["--policy.dim_model", str(args.policy_dim_model)]
+    if args.policy_dim_feedforward is not None:
+        cmd_train += ["--policy.dim_feedforward", str(args.policy_dim_feedforward)]
+    if args.policy_n_heads is not None:
+        cmd_train += ["--policy.n_heads", str(args.policy_n_heads)]
+    if args.policy_n_encoder_layers is not None:
+        cmd_train += ["--policy.n_encoder_layers", str(args.policy_n_encoder_layers)]
 
-    run(cmd_train)
+    train_env = None
+    env_overrides: dict[str, str] = {}
+    torch_alloc_conf = args.torch_alloc_conf.strip()
+    if torch_alloc_conf:
+        train_env = os.environ.copy()
+        for key in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF"):
+            if not train_env.get(key):
+                train_env[key] = torch_alloc_conf
+                env_overrides[key] = torch_alloc_conf
+
+    run(cmd_train, env=train_env, env_overrides=env_overrides)
 
 
 if __name__ == "__main__":
     main()
-

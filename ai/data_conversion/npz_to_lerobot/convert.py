@@ -27,6 +27,10 @@
     frame_index/fps 기반으로 단조 증가 timestamp를 생성하게 둔다.
   - `delta_q[t] = q[t+1] - q[t]` 이므로 마지막 프레임은 학습 샘플에서 제외한다.
   - Depth는 현재 baseline에서는 입력으로 쓰지 않지만, NPZ에 남겨두고 추후 확장에 활용한다.
+
+extended 프로파일:
+  - NPZ에 ``ee_pose``가 없으면 ``--fk_urdf`` + Pinocchio로 TCP FK를 계산해 7D를 채운다.
+  - NPZ에 ``gripper_state``가 없으면 이산 ``gripper_actions[t]``를 gripper_state 슬롯에 넣는다.
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ from __future__ import annotations
 import argparse
 import glob
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 
@@ -304,7 +308,8 @@ def main() -> None:
         "--state_profile",
         choices=["baseline", "extended"],
         default="baseline",
-        help="baseline: q/dq/tau(18D), extended: +ee_pose(7D)+gripper_state(1D).",
+        help="baseline: q/dq/tau(18D). extended: +ee_pose(7)+gripper_state(1)=26D; "
+        "ee_pose는 NPZ 키 또는 --fk_urdf FK; gripper_state 없으면 gripper_actions[t].",
     )
     parser.add_argument(
         "--include_depth",
@@ -316,6 +321,21 @@ def main() -> None:
         type=int,
         default=200,
         help="Print conversion progress every N kept frames (0 disables).",
+    )
+    parser.add_argument(
+        "--fk_urdf",
+        default="",
+        help="Indy7 URDF path: when extended and NPZ has no ee_pose, fill ee via Pinocchio TCP FK.",
+    )
+    parser.add_argument(
+        "--fk_tcp_frame",
+        default="tcp",
+        help="End-effector frame name in URDF (Neuromeka single-arm default: tcp).",
+    )
+    parser.add_argument(
+        "--fk_joint_names",
+        default="joint0,joint1,joint2,joint3,joint4,joint5",
+        help="Comma-separated URDF joint names matching NPZ joint column order.",
     )
     args = parser.parse_args()
 
@@ -379,6 +399,18 @@ def main() -> None:
 
     include_ee_pose = args.state_profile == "extended"
     include_gripper_state = args.state_profile == "extended"
+
+    fk_solver: Optional[Any] = None
+    if include_ee_pose and args.fk_urdf.strip():
+        from indy7_tcp_fk import Indy7TcpFk
+
+        jnames = [x.strip() for x in str(args.fk_joint_names).split(",") if x.strip()]
+        fk_solver = Indy7TcpFk(
+            args.fk_urdf.strip(),
+            tcp_frame=str(args.fk_tcp_frame).strip() or "tcp",
+            joint_names=jnames,
+        )
+
     features = _build_features_ext(
         h=h,
         w=w,
@@ -434,15 +466,29 @@ def main() -> None:
             overhead_rgb_images = ep["overhead_rgb_images"].astype(np.uint8)
             wrist_depth_images = ep["wrist_depth_images"] if "wrist_depth_images" in ep else None
             overhead_depth_images = ep["overhead_depth_images"] if "overhead_depth_images" in ep else None
-            ee_pose = _ensure_matrix(ep["ee_pose"], 7, "ee_pose") if "ee_pose" in ep else None
             gripper_state = (
                 np.asarray(ep["gripper_state"], dtype=np.float32).reshape(-1) if "gripper_state" in ep else None
             )
             gripper_actions = ep["gripper_actions"]
 
-        n = joint_positions.shape[0]
-        if n < 2:
-            continue
+            n = joint_positions.shape[0]
+            if n < 2:
+                continue
+
+            if include_ee_pose:
+                if "ee_pose" in ep:
+                    ee_pose_mat = _ensure_matrix(ep["ee_pose"], 7, "ee_pose")
+                else:
+                    if fk_solver is None:
+                        raise ValueError(
+                            "state_profile=extended but NPZ has no 'ee_pose'. Either record ee_pose in NPZ or pass "
+                            "--fk_urdf PATH_TO_INDY7.urdf (Pinocchio required) to compute TCP pose from joint_positions."
+                        )
+                    ee_pose_mat = np.zeros((n, 7), dtype=np.float32)
+                    for ti in range(n):
+                        ee_pose_mat[ti] = fk_solver.compute(joint_positions[ti])
+            else:
+                ee_pose_mat = None
 
         # 기본은 전체 transition 유지
         keep_mask = np.ones((n - 1,), dtype=bool)
@@ -471,13 +517,16 @@ def main() -> None:
 
             state_vec = np.concatenate([q_t, dq_t, tau_t], axis=0).astype(np.float32)
             if include_ee_pose:
-                ee_vec = ee_pose[t] if ee_pose is not None and len(ee_pose) > t else np.zeros((7,), dtype=np.float32)
+                assert ee_pose_mat is not None
+                ee_vec = ee_pose_mat[t]
                 state_vec = np.concatenate([state_vec, ee_vec.astype(np.float32)], axis=0).astype(np.float32)
             if include_gripper_state:
+                # Mark7 등: 연속 피드백이 없어도 NPZ의 이산 명령(gripper_actions)을 상태로 쓰면
+                # 학습·추론에서 "현재 그리퍼 모드" 슬롯이 0 패딩이 되지 않는다.
                 gs = (
                     float(gripper_state[t])
                     if gripper_state is not None and len(gripper_state) > t
-                    else 0.0
+                    else float(gripper_actions[t])
                 )
                 state_vec = np.concatenate([state_vec, np.array([gs], dtype=np.float32)], axis=0).astype(np.float32)
             action_vec = np.concatenate([delta_q, np.array([gripper_cmd], dtype=np.float32)], axis=0).astype(
