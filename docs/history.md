@@ -728,3 +728,265 @@ python -c "import ast, pathlib; files=[...]; [ast.parse(pathlib.Path(f).read_tex
 - MuJoCo 장면에서 Indy7과 Mark7이 함께 로드되고,
 - 키보드로 Indy7 Cartesian 이동 + Mark7 프리셋 조작이 가능해짐.
 - 장착 자세(`mark7_mount_joint`의 `xyz/rpy`)는 작업 포즈 기준 미세 튜닝 가능 상태.
+
+---
+
+## 26.05.07 학습 입력 확장(extended state + ee_pose FK + gripper_action) + 100ep 데이터 학습 시도
+
+### 1) 배경: 기존 extended 26D의 빈 슬롯 문제
+
+- `--state_profile extended`는 형식상 `q+dq+τ(18) + ee_pose(7) + gripper_state(1) = 26D` 구조였지만,
+  - 수집기(`pipet_data_collector`)가 NPZ에 `ee_pose`/`gripper_state`를 저장하지 않음(`gripper_actions`만 저장).
+  - 변환기는 두 키가 없으면 해당 7+1칸을 **0으로 패딩**해 왔음.
+  - 결과: 26D 중 뒤 8칸이 사실상 가짜 입력 → 모델이 "관절 + 이미지(+depth)" 위주로 학습.
+
+### 2) 변환 단계 보강: 그리퍼 모드 + Pinocchio TCP FK
+
+- `ai/data_conversion/npz_to_lerobot/convert.py` 수정:
+  - `gripper_state` 미존재 시 **`gripper_actions[t]` 이산값(0~4)** 을 그 자리에 채움(피드백 부재 대체).
+  - `ee_pose` 미존재 시 **`--fk_urdf` URDF + Pinocchio**로 매 프레임 TCP FK 계산
+    → `(x, y, z, qx, qy, qz, qw)` 7D를 `observation.state[18:25]`에 채움.
+  - 새 인자: `--fk_urdf`, `--fk_tcp_frame`(기본 `tcp`), `--fk_joint_names`(기본 `joint0,...,joint5`).
+- 신규 모듈: `ai/data_conversion/npz_to_lerobot/indy7_tcp_fk.py` (Pinocchio 래퍼).
+  - URDF에 동일 이름의 FRAME/BODY가 같이 있는 경우(예: `tcp` 프레임 + body)에 대비해 **`pin.BODY` 우선** 조회 후 fallback.
+
+### 3) 추론 단계 보강: TF + FK fallback로 동일 정의 맞춤
+
+- `ros2_ws/src/pipet_inference/pipet_inference/inference_node.py`:
+  - `state_target_dim >= 26`이면 `observation.state[18:25]`를 **TF lookup(`world` ← `tcp`)** 결과로 채우고, 실패 시 **같은 URDF의 Pinocchio FK**로 fallback.
+  - `observation.state[25]`는 마지막 그리퍼 명령(`_last_grip_cmd`, 0~4)을 그대로 기록 → 학습 분포와 일치.
+- `inference.launch.py` 신규 인자: `use_tf_ee_pose`, `ee_tf_parent_frame`, `ee_tf_child_frame`, `fk_urdf_path`, `fk_tcp_frame`, `fk_joint_names`.
+- `package.xml`에 `tf2_ros` depend 추가, ZMQ 사이드카(`zmq_act_server.py`/`sidecar_zmq_client.py`)는 이전에 이미 6-frame 멀티파트로 depth까지 전달.
+- 결론: **변환과 추론이 같은 URDF·같은 TCP 정의**를 쓰면, 학습/추론 입력 분포가 일치하도록 설계.
+
+### 4) 실행 스크립트 정비
+
+- `run_scripts/20_train_lerobot.sh`: 6번째 인자부터 `run_lerobot_train.py`에 그대로 패스(`--state_profile extended --fk_urdf ... --include_depth`).
+- `run_scripts/40_inference_ros.sh`: `[fk_urdf_path]`, `[state_target_dim]` 추가 인자.
+- `run_scripts/README.md` 업데이트.
+
+### 5) 신규 데이터셋: `26.05.03_half_data_100` (검증 결과)
+
+- 경로: `ros2_ws/episodes/success/26.05.03_half_data_100/`
+- 수집 기간: 2026-05-03 14:34 ~ 19:53.
+- 총 100/100 NPZ, 28GB, 총 35,422 프레임(min/median/max = 237/338/607).
+- 필수 키 누락·손상·`success=False` 0건. 변환·학습 직행 가능.
+
+### 6) 변환·학습 실행 결과
+
+#### 6-1) Pinocchio 환경 설정
+
+- `lerobot` conda env에 Pinocchio 미설치 → `pip install pin`(numpy 2.x 경고 있으나 import 정상).
+- Indy7 URDF는 `mujoco_env/generated/indy7_mujoco.urdf` 사용(서브모듈 미빌드 시 임시 활용).
+  - **주의:** 이 URDF는 MuJoCo용 합성본이라 Mark7까지 포함되어 있어 추후 실기 추론에는 Neuromeka `indy_description` 정식 URDF로 교체 권장.
+
+#### 6-2) 변환 완료(2026-05-07 18:12)
+
+- 입력: `26.05.03_half_data_100` 100ep
+- 출력: `ai/datasets/pipet_extended_depth_100`
+  - `repo_id = pipet_extended_depth_100`
+  - 100 parquet 청크 / **15GB**
+  - `meta/info.json`: total_episodes=100, total_frames=35,322, fps=20
+  - features: `front`, `front_depth`, `overhead`, `overhead_depth`, `state(26D)`, `action(7D)`
+- 변환 옵션: `--state_profile extended --include_depth --fk_urdf ...indy7_mujoco.urdf --image_resize_to 360x480`
+
+#### 6-3) 첫 학습 시도 → CUDA OOM
+
+- `batch_size=16` + 8GB GPU(7.66 GiB)에서 첫 backward에 OOM 발생:
+  - `torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 20.00 MiB. GPU 0 has a total capacity of 7.66 GiB of which 5.88 MiB is free.`
+- 원인: ACT 입력이 RGB×2 + depth×2 + state 26D + chunk 40이라 8GB급 GPU에선 batch 16이 무리.
+
+#### 6-4) 재실행 명령(채택안: batch=8, steps=100k)
+
+```bash
+cd /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai
+source /home/sirlab-pwd-0000/miniconda3/etc/profile.d/conda.sh
+conda activate lerobot
+
+export PYTHONPATH="${PWD}/ai/lerobot_source/lerobot/src:${PYTHONPATH:-}"
+export PYTHONUNBUFFERED=1
+export HF_HOME="${PWD}/ai/.cache/huggingface"
+export HF_DATASETS_CACHE="${HF_HOME}/datasets"
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+mkdir -p "${HF_DATASETS_CACHE}" ai/logs
+
+python ai/lerobot/run_lerobot_train.py \
+  --skip_convert \
+  --episodes_dir "${PWD}/ros2_ws/episodes/success/26.05.03_half_data_100" \
+  --dataset_output_dir "${PWD}/ai/datasets/pipet_extended_depth_100" \
+  --dataset_repo_id pipet_extended_depth_100 \
+  --job_name act_pipet_extended_depth_100 \
+  --steps 100000 \
+  --eval_freq 10000 \
+  --save_freq 10000 \
+  --log_freq 100 \
+  --batch_size 8 \
+  --chunk_size 40 \
+  --n_action_steps 40 \
+  --num_workers 2 \
+  --device cuda \
+2>&1 | tee "ai/logs/train_act_pipet_extended_depth_100_$(date +%Y%m%d_%H%M%S).log"
+```
+
+### 9) 2026-05-09 실기 추론 결과 및 grasp gate 보정
+
+#### 9-1) 실기 관찰
+
+- 100k 학습 모델은 파이펫의 대략적인 위치/방향은 찾지만, 실행마다 최종 접근 위치가 흔들리고 완전한 grasp가 안정적으로 되지 않음.
+- 증상은 단순한 "파이펫 미검출"보다는:
+  - 마지막 2~5cm 정밀 접근이 불안정함.
+  - grasp 명령이 너무 빨리 나오거나, 팔이 아직 움직이는 중에 손이 닫힘.
+  - 같은 모델/같은 태스크에서도 초기 조건과 카메라 입력 변화에 민감함.
+- 판단:
+  - 코드 보정만으로 일부 개선은 가능하지만, 근본적으로는 데이터 수집/라벨/마지막 접근 제어 문제가 큼.
+  - 특히 `gripper_action`은 `action[6]` 회귀값으로 학습되어 "정확한 이벤트 타이밍"보다 "현재 그리퍼 모드"처럼 동작하기 쉬움.
+
+#### 9-2) 추론 노드 grasp gate 보강
+
+- `ros2_ws/src/pipet_inference/pipet_inference/inference_node.py`에 grasp 실행 조건을 추가:
+  - `grasp_delay_steps`: 첫 grasp 예측 후 일정 tick 동안 바로 닫지 않음.
+  - `pre_grasp_delta_scale`: delay/gate 중에만 팔 `delta_q`에 추가 배율을 적용.
+  - `grasp_confirm_steps`: grasp가 연속으로 일정 횟수 이상 예측되어야 함.
+  - `grasp_max_delta_norm`: 팔 이동량(`delta_q` norm)이 충분히 작아졌을 때만 grasp 허용.
+- 그리퍼 서비스 호출 보정:
+  - 기존에는 서비스가 준비되지 않은 순간에도 `_last_grip_cmd`가 먼저 바뀔 수 있어, 실제 grasp 실패 후 재시도하지 않을 위험이 있었음.
+  - 이제 서비스가 준비되어 호출을 보낸 뒤에만 `_last_grip_cmd`를 갱신하고, 서비스 결과 실패/예외를 로그로 남김.
+- `inference.launch.py`와 `run_scripts/40_inference_ros.sh`에 위 파라미터를 노출.
+- 추천 시작값:
+
+```bash
+grasp_delay_steps:=8
+pre_grasp_delta_scale:=1.15
+grasp_confirm_steps:=8
+grasp_max_delta_norm:=0.008
+max_joint_speed_rad_s:=0.25
+```
+
+- 튜닝 방향:
+  - 너무 빨리 잡으면 `grasp_delay_steps`를 늘리거나 `grasp_max_delta_norm`을 낮춤.
+  - 아예 안 잡으면 `grasp_confirm_steps`를 줄이거나 `grasp_max_delta_norm`을 높임.
+  - 더 깊게 들어가야 하면 `pre_grasp_delta_scale`을 조금 높임.
+
+#### 9-3) 검증
+
+- Python AST parse:
+  - `inference_node.py`
+  - `inference.launch.py`
+- Shell syntax:
+  - `run_scripts/40_inference_ros.sh`
+- ROS build:
+  - `colcon build --symlink-install --packages-select pipet_inference pipet_bringup`
+
+#### 9-4) 다음 실험 방향: Gemini-ER 검증기
+
+- 현재 ACT만으로 위치/타이밍이 흔들리므로, 새 브랜치에서 Gemini Robotics-ER를 "파이펫 위치/잡기 타이밍 검증기"로 붙이는 실험을 진행하기로 함.
+- 목표는 Gemini-ER가 직접 로봇을 제어하는 것이 아니라:
+  - wrist/overhead 이미지에서 파이펫 point/bbox를 찾고,
+  - gripper 중심 근처에 파이펫이 충분히 들어왔는지 판단하고,
+  - 조건이 맞을 때만 ACT의 grasp를 허용하는 보조 판단기로 쓰는 것.
+- 공식 Gemini Robotics-ER 1.6 문서 기준:
+  - 모델명: `gemini-robotics-er-1.6-preview`
+  - 이미지 입력 + 자연어 prompt로 2D point/bbox/trajectory 같은 JSON 구조화 출력을 받을 수 있음.
+  - 출력 좌표는 `[y, x]`, 0~1000 정규화 형식 예시가 문서에 제시되어 있음.
+
+- 데이터셋이 이미 변환돼 있어 `--skip_convert`. 디스크/시간 절약.
+- `PYTORCH_ALLOC_CONF=expandable_segments:True`: 메모리 단편화 완화.
+- 8GB GPU에서 batch=8이 안전선. 8에서도 OOM이면 `--batch_size 4`로 한 단계 더 낮춤.
+- batch가 줄었으니 동일 데이터 노출량을 맞추기 위해 `steps=100000`으로 상향(이전 v2는 80k).
+
+### 7) 다음 점검 항목
+
+- 첫 100~500step 안에 `Training: ... step` 진행바 + loss 하강 확인.
+- 10k step 체크포인트(`checkpoints/010000/`) 저장 직후, 추론에서 `state_target_dim:=26`, `fk_urdf_path:=…/indy7_mujoco.urdf`로 분포 일치 검증.
+- 실기 운영 전 단계로 Neuromeka `indy_description` 정식 URDF로 변환·추론 모두 재정렬할 것(현재는 임시 MuJoCo 합성본).
+
+### 8) 2026-05-07 CUDA OOM 대응 및 학습 래퍼 보강
+
+#### 8-1) OOM 재현/원인 정리
+
+- `pipet_extended_depth_100` 데이터셋은 360x480 이미지 입력 4개(`front`, `overhead`, `front_depth`, `overhead_depth`)를 사용한다.
+- RTX 3080 Laptop 8GB급 GPU에서 ACT 기본 구조(`dim_model=512`, `dim_feedforward=3200`, `chunk_size=40`)와 `batch_size=16` 조합은 첫 backward에서 반복적으로 OOM 발생.
+- `PYTORCH_ALLOC_CONF=expandable_segments:True`만으로는 `batch_size=16`을 살릴 수 없었음.
+  - allocator 단편화 문제가 아니라, 실제 활성화 메모리 자체가 8GB 한계를 넘는 상황으로 판단.
+
+#### 8-2) `run_lerobot_train.py` 보강
+
+- `ai/lerobot/run_lerobot_train.py`에 ACT 메모리 조절 인자를 추가:
+  - `--chunk_size`
+  - `--n_action_steps`
+  - `--use_amp`
+  - `--policy_dim_model`
+  - `--policy_dim_feedforward`
+  - `--policy_n_heads`
+  - `--policy_n_encoder_layers`
+  - `--torch_alloc_conf`
+- 기존에는 wrapper 내부에서 `policy.chunk_size=40`, `policy.n_action_steps=40`, `policy.use_amp=true`가 하드코딩되어 있었지만, 이제 실행 명령에서 명시적으로 조절 가능.
+- 학습 subprocess 실행 시 `--torch_alloc_conf` 기본값(`expandable_segments:True`)을 사용해 아래 환경변수를 자동 주입:
+  - `PYTORCH_ALLOC_CONF=expandable_segments:True`
+  - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+- `--n_action_steps > --chunk_size`인 경우 즉시 에러 처리.
+- `--policy_n_heads`가 `dim_model`을 나누지 못하는 경우 즉시 에러 처리.
+
+#### 8-3) 검증 결과
+
+- AST parse 통과:
+  - `python -c "import ast,pathlib; ast.parse(...run_lerobot_train.py...)"`
+- CUDA 1-step smoke test:
+  - `batch_size=4`, `chunk_size=20`, `num_workers=0`: 성공
+  - `batch_size=4`, `chunk_size=40`, `num_workers=0`: 성공
+  - `batch_size=8`, `chunk_size=40`, `num_workers=0`: 성공
+  - `batch_size=8`, `chunk_size=40`, `num_workers=4`: 성공
+  - `batch_size=16`, `chunk_size=40`, `num_workers=4`: 실패(OOM)
+- 결론:
+  - 현재 데이터셋/모델/GPU 조합의 안전선은 `batch_size=8`.
+  - 데이터 로딩 병목(`data_s`)이 크면 `num_workers=4`가 유리.
+  - 그래도 OOM이 나면 `batch_size=4`로 낮추는 것이 다음 대응.
+
+#### 8-4) 최신 재학습 실행안
+
+- 실패한 첫 실행으로 모델 출력 폴더가 일부 생성되었을 수 있으므로, 재학습 전 `ai/models/act_pipet_extended_depth_100`만 삭제한다.
+- 변환된 데이터셋(`ai/datasets/pipet_extended_depth_100`)은 삭제하지 않는다.
+- 사용자와 최종 합의한 재실행 설정:
+  - `steps=80000`
+  - `batch_size=8`
+  - `chunk_size=40`
+  - `n_action_steps=40`
+  - `num_workers=4`
+
+```bash
+cd /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai
+source /home/sirlab-pwd-0000/miniconda3/etc/profile.d/conda.sh
+conda activate lerobot
+
+set -o pipefail
+
+export PYTHONPATH="${PWD}/ai/lerobot_source/lerobot/src:${PYTHONPATH:-}"
+export PYTHONUNBUFFERED=1
+export HF_HOME="${PWD}/ai/.cache/huggingface"
+export HF_DATASETS_CACHE="${HF_HOME}/datasets"
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+
+mkdir -p "${HF_DATASETS_CACHE}" ai/logs
+
+OUT_DIR="${PWD}/ai/models/act_pipet_extended_depth_100"
+
+rm -rf "${OUT_DIR}"
+
+python ai/lerobot/run_lerobot_train.py \
+  --skip_convert \
+  --episodes_dir "${PWD}/ros2_ws/episodes/success/26.05.03_half_data_100" \
+  --dataset_output_dir "${PWD}/ai/datasets/pipet_extended_depth_100" \
+  --dataset_repo_id pipet_extended_depth_100 \
+  --output_dir "${OUT_DIR}" \
+  --job_name act_pipet_extended_depth_100 \
+  --steps 80000 \
+  --eval_freq 10000 \
+  --save_freq 10000 \
+  --log_freq 100 \
+  --batch_size 8 \
+  --chunk_size 40 \
+  --n_action_steps 40 \
+  --num_workers 4 \
+  --device cuda \
+  2>&1 | tee "ai/logs/train_act_pipet_extended_depth_100_$(date +%Y%m%d_%H%M%S).log"
+```
