@@ -63,6 +63,19 @@ def main() -> None:
         default="",
         help="비우면 ai/models/<job_name> (절대 경로 권장)",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume lerobot-train from output_dir/checkpoints/last. Keeps optimizer/training state.",
+    )
+    parser.add_argument(
+        "--resume_config_path",
+        default="",
+        help=(
+            "Optional train_config.json path for resume. "
+            "Default: <output_dir>/checkpoints/last/pretrained_model/train_config.json"
+        ),
+    )
     parser.add_argument("--job_name", default="act_pipet")
     parser.add_argument("--steps", type=int, default=20_000)
     parser.add_argument("--eval_freq", type=int, default=10_000)
@@ -158,6 +171,12 @@ def main() -> None:
         help="Per-step joint delta threshold (rad) for idle detection during conversion.",
     )
     parser.add_argument(
+        "--idle_keep_action_window_sec",
+        type=float,
+        default=2.0,
+        help="Keep idle frames around gripper action changes during conversion to preserve grasp timing.",
+    )
+    parser.add_argument(
         "--state_profile",
         choices=["baseline", "extended"],
         default="baseline",
@@ -232,6 +251,8 @@ def main() -> None:
                 str(args.drop_idle_sec),
                 "--idle_joint_delta_thresh",
                 str(args.idle_joint_delta_thresh),
+                "--idle_keep_action_window_sec",
+                str(args.idle_keep_action_window_sec),
             ]
         cmd_convert += ["--state_profile", args.state_profile]
         if args.include_depth:
@@ -299,6 +320,19 @@ def main() -> None:
         cmd_train += ["--policy.n_heads", str(args.policy_n_heads)]
     if args.policy_n_encoder_layers is not None:
         cmd_train += ["--policy.n_encoder_layers", str(args.policy_n_encoder_layers)]
+    if args.resume:
+        resume_config_path = args.resume_config_path.strip()
+        if not resume_config_path:
+            resume_config_path = str(
+                Path(output_dir) / "checkpoints" / "last" / "pretrained_model" / "train_config.json"
+            )
+        if not Path(resume_config_path).exists():
+            parser.error(f"--resume requested, but train_config.json was not found: {resume_config_path}")
+        # LeRobot's custom parser only detects config_path in --key=value form.
+        cmd_train += [
+            "--resume=true",
+            f"--config_path={resume_config_path}",
+        ]
 
     train_env = None
     env_overrides: dict[str, str] = {}

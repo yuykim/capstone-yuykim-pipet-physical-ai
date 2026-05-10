@@ -211,6 +211,7 @@ def _compute_idle_keep_mask(
     *,
     min_idle_steps: int,
     joint_delta_thresh: float,
+    protect_action_steps: int = 0,
 ) -> np.ndarray:
     """
     transition 인덱스 t(0..N-2) 기준 keep mask를 만든다.
@@ -219,7 +220,9 @@ def _compute_idle_keep_mask(
       - 팔: |q[t+1] - q[t]|의 모든 축이 joint_delta_thresh 미만
       - 그리퍼: gripper_actions[t+1] == gripper_actions[t] (상태 변화 없음)
 
-    위 idle이 min_idle_steps 이상 연속된 구간은 통째로 drop한다.
+    위 idle이 min_idle_steps 이상 연속된 구간은 drop한다.
+    단, non-hold gripper action 또는 gripper action transition 주변
+    protect_action_steps 구간은 grasp 타이밍 학습을 위해 보존한다.
     """
     n = int(joint_positions.shape[0])
     m = max(0, n - 1)  # number of transitions / trainable steps
@@ -231,9 +234,11 @@ def _compute_idle_keep_mask(
     arm_idle = np.max(np.abs(delta_q), axis=1) < float(joint_delta_thresh)
     grip_idle = gripper_actions[1:m + 1] == gripper_actions[:m]
     idle = arm_idle & grip_idle
+    protect = _compute_action_protect_mask(gripper_actions, m=m, window_steps=protect_action_steps)
 
     if min_idle_steps <= 1:
         keep[idle] = False
+        keep[protect] = True
         return keep
 
     # 연속 idle run 중 길이가 min_idle_steps 이상인 구간만 drop
@@ -249,7 +254,34 @@ def _compute_idle_keep_mask(
         if run_len >= min_idle_steps:
             keep[run_start:run_end] = False
         run_start = run_end
+    keep[protect] = True
     return keep
+
+
+def _compute_action_protect_mask(
+    gripper_actions: np.ndarray,
+    *,
+    m: int,
+    window_steps: int,
+) -> np.ndarray:
+    """Protect transitions around gripper events from idle-frame dropping."""
+    protect = np.zeros((m,), dtype=bool)
+    if m <= 0 or window_steps <= 0:
+        return protect
+
+    actions = np.asarray(gripper_actions).reshape(-1)
+    if actions.shape[0] < 2:
+        return protect
+
+    t_actions = actions[:m]
+    t_next_actions = actions[1 : m + 1]
+    event = (t_actions != 0) | (t_next_actions != 0) | (t_next_actions != t_actions)
+    event_indices = np.flatnonzero(event)
+    for idx in event_indices:
+        start = max(0, int(idx) - int(window_steps))
+        end = min(m, int(idx) + int(window_steps) + 1)
+        protect[start:end] = True
+    return protect
 
 
 def _depth_u16_to_u8_rgb(depth_hw: np.ndarray) -> np.ndarray:
@@ -303,6 +335,15 @@ def main() -> None:
         type=float,
         default=1e-4,
         help="Per-step joint delta threshold (rad) for idle detection.",
+    )
+    parser.add_argument(
+        "--idle_keep_action_window_sec",
+        type=float,
+        default=2.0,
+        help=(
+            "When --drop_idle_sec is enabled, keep idle transitions within this many seconds around "
+            "non-hold gripper actions or gripper action changes. This preserves grasp/open timing."
+        ),
     )
     parser.add_argument(
         "--state_profile",
@@ -494,11 +535,16 @@ def main() -> None:
         keep_mask = np.ones((n - 1,), dtype=bool)
         if args.drop_idle_sec and args.drop_idle_sec > 0.0:
             min_idle_steps = max(1, int(round(float(args.drop_idle_sec) * float(args.fps))))
+            protect_action_steps = max(
+                0,
+                int(round(float(args.idle_keep_action_window_sec) * float(args.fps))),
+            )
             keep_mask = _compute_idle_keep_mask(
                 joint_positions,
                 np.asarray(gripper_actions),
                 min_idle_steps=min_idle_steps,
                 joint_delta_thresh=float(args.idle_joint_delta_thresh),
+                protect_action_steps=protect_action_steps,
             )
             dropped_idle_frames_total += int((~keep_mask).sum())
 
@@ -580,6 +626,7 @@ def main() -> None:
         print(
             f"Idle filter: drop_idle_sec={args.drop_idle_sec}, "
             f"idle_joint_delta_thresh={args.idle_joint_delta_thresh}, "
+            f"idle_keep_action_window_sec={args.idle_keep_action_window_sec}, "
             f"dropped_transitions={dropped_idle_frames_total}"
         )
     print(f"Done. Kept {kept_episodes} episodes -> {output_dir}")
@@ -587,4 +634,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
