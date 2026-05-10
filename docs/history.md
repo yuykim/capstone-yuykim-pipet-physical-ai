@@ -990,3 +990,293 @@ python ai/lerobot/run_lerobot_train.py \
   --device cuda \
   2>&1 | tee "ai/logs/train_act_pipet_extended_depth_100_$(date +%Y%m%d_%H%M%S).log"
 ```
+
+## 26.05.09 Gemini-ER 검증기 실험 결과와 grasp-focus 추가 데이터 생성
+
+### 1) 실기 문제 재정의
+
+- 100k step 학습 모델은 파이펫을 완전히 엉뚱한 곳에서 찾는 것은 아니었음.
+- 실제 실패는 대부분 마지막 접근 구간에서 발생:
+  - 파이펫까지 대략 접근은 하지만 마지막 1~2cm 정밀 위치가 흔들림.
+  - grasp가 너무 빠르게 나오거나, 손가락 사이에 파이펫이 충분히 들어가기 전에 닫힘.
+  - 실행마다 최종 위치가 조금씩 달라져 성공률이 안정적이지 않음.
+- 결론:
+  - 단순히 `grasp_delay_steps`, `grasp_confirm_steps`, `pre_grasp_delta_scale` 같은 추론 보정만으로는 한계가 있음.
+  - 모델이 "마지막 2cm 접근 + 손가락 사이에 파이펫이 들어간 상태 + 그 직후 grasp" 구간을 더 많이 학습해야 할 가능성이 큼.
+
+### 2) Gemini Robotics-ER 검증기 실험
+
+- 별도 브랜치 `feature/gemini-er-verifier`에서 Gemini Robotics-ER를 grasp 허용 검증기로 붙이는 실험을 진행.
+- 목표:
+  - Gemini가 로봇을 직접 제어하는 것이 아니라,
+  - wrist/overhead 이미지를 보고 파이펫이 손가락 사이에 충분히 들어왔는지 판단하고,
+  - 조건이 맞을 때만 ACT의 grasp를 통과시키는 보조 gate로 사용.
+- API 확인:
+  - `GEMINI_API_KEY` 설정 후 Gemini API 호출 성공.
+  - `models/gemini-robotics-er-1.5-preview`, `models/gemini-robotics-er-1.6-preview` 접근 가능 확인.
+- 실기 결과:
+  - 낮은 빈도(`gemini_er_hz:=0.5`, `0.1`)와 긴 timeout을 적용해도 HTTP 429 quota/rate-limit에 자주 걸림.
+  - quota 오류가 발생하면 verifier가 최신 판단을 주지 못하고, grasp gate가 보수적으로 막히는 상황이 생김.
+- 결론:
+  - Gemini-ER는 디버깅/오프라인 검증 또는 낮은 빈도의 보조 판단기로는 의미가 있음.
+  - 현재 API quota 상태에서는 실시간 grasp gate로 쓰기 어렵고, 당장 성공률 개선의 1순위는 데이터 보강으로 판단.
+
+### 3) idle frame 삭제 영향 재검토
+
+- 처음에는 convert 단계에서 정지 프레임을 삭제해서 grasp 직전/직후의 중요한 장면이 빠졌을 가능성을 의심.
+- 하지만 기존 `pipet_extended_depth_100` 데이터셋은 raw 100개 episode의 transition 수와 변환 후 frame 수가 거의 일치:
+  - raw 기준 transition: 약 35,322
+  - 기존 LeRobot dataset `total_frames`: 35,322
+- 결론:
+  - 이번 실패의 주원인은 "idle frame 삭제"보다는 grasp 근처 장면의 상대적 비중 부족, 마지막 접근 분포 부족, grasp 타이밍 라벨의 애매함에 더 가까움.
+
+### 4) grasp-focus NPZ 추가 데이터 생성
+
+- 기존 100개 성공 episode는 그대로 유지.
+- 각 episode에서 첫 `grasp` 시점 주변만 잘라낸 짧은 focus episode를 추가 생성.
+- 목적:
+  - 전체 approach 데이터는 유지하면서,
+  - 마지막 2cm 접근과 grasp 직전/직후 장면의 학습 비중을 높임.
+
+추가한 스크립트:
+
+```text
+ai/data_conversion/make_grasp_focus_episodes.py
+```
+
+생성 방식:
+
+- 입력: `ros2_ws/episodes/success/26.05.03_half_data_100`
+- 출력: `ros2_ws/episodes/success/26.05.03_half_data_100_grasp_focus`
+- 각 원본 episode를 `_orig_...npz`로 복사.
+- 각 episode의 첫 grasp 주변을 잘라 `_grasp_focus_...npz`로 저장.
+- 기본 crop 범위:
+  - grasp 이전 4.0초
+  - grasp 이후 2.0초
+  - 20Hz 기준 crop episode당 약 120 frame
+- 생성 결과:
+  - 원본 100개 + grasp-focus 100개 = 총 200 NPZ
+  - NPZ 폴더 용량: 약 37GB
+
+실행 명령:
+
+```bash
+python ai/data_conversion/make_grasp_focus_episodes.py \
+  --input_dir "${PWD}/ros2_ws/episodes/success/26.05.03_half_data_100" \
+  --output_dir "${PWD}/ros2_ws/episodes/success/26.05.03_half_data_100_grasp_focus" \
+  --pre_grasp_sec 4.0 \
+  --post_grasp_sec 2.0 \
+  --fps 20 \
+  2>&1 | tee "ai/logs/make_grasp_focus_episodes_$(date +%Y%m%d_%H%M%S).log"
+```
+
+### 5) 새 LeRobot dataset 변환 완료
+
+- 새 NPZ 폴더를 LeRobotDataset 형식으로 변환.
+- 출력:
+
+```text
+ai/datasets/pipet_extended_depth_100_grasp_focus
+```
+
+변환 결과:
+
+- `total_episodes`: 200
+- `total_frames`: 47,222
+- `fps`: 20
+- 데이터셋 용량: 약 20GB
+- features:
+  - `observation.images.front`
+  - `observation.images.front_depth`
+  - `observation.images.overhead`
+  - `observation.images.overhead_depth`
+  - `observation.state`
+  - `action`
+
+변환 명령:
+
+```bash
+python ai/data_conversion/npz_to_lerobot/convert.py \
+  --episodes_dir "${PWD}/ros2_ws/episodes/success/26.05.03_half_data_100_grasp_focus" \
+  --output_dir "${PWD}/ai/datasets/pipet_extended_depth_100_grasp_focus" \
+  --output_repo_id pipet_extended_depth_100_grasp_focus \
+  --fps 20 \
+  --task "Pick up the pipette" \
+  --image_resize_to 360x480 \
+  --state_profile extended \
+  --include_depth \
+  --fk_urdf "${PWD}/mujoco_env/generated/indy7_mujoco.urdf" \
+  --fk_tcp_frame tcp \
+  --log_every_frames 1000 \
+  2>&1 | tee "ai/logs/convert_pipet_extended_depth_100_grasp_focus_$(date +%Y%m%d_%H%M%S).log"
+```
+
+### 6) 관련 코드 변경
+
+- `ai/data_conversion/make_grasp_focus_episodes.py`
+  - grasp 주변 crop episode 생성 스크립트 추가.
+- `ai/data_conversion/npz_to_lerobot/convert.py`
+  - `--idle_keep_action_window_sec` 인자 추가.
+  - `--drop_idle_sec`를 사용할 때 non-hold action 주변 frame을 보호할 수 있도록 보강.
+  - 이번 grasp-focus dataset 변환은 idle drop 없이 진행했으므로, 이 옵션은 다음 실험용 안전장치에 가까움.
+- `ai/lerobot/run_lerobot_train.py`
+  - convert wrapper 경로에도 `--idle_keep_action_window_sec` 전달 가능하게 보강.
+
+검증:
+
+```bash
+python -m py_compile \
+  ai/data_conversion/make_grasp_focus_episodes.py \
+  ai/data_conversion/npz_to_lerobot/convert.py \
+  ai/lerobot/run_lerobot_train.py
+```
+
+- 위 문법 체크 통과.
+- `meta/info.json` 확인 결과 새 dataset의 episode/frame/features 정상.
+
+### 7) 다음 학습안: 60k 먼저 비교
+
+- 기존 100k 모델은 과대적합 또는 최종 접근 위치 외움 가능성이 있음.
+- 새 grasp-focus 데이터셋은 grasp 주변 분포를 강화했으므로, 우선 60k step으로 학습해 기존 100k 모델과 비교.
+- 성능이 좋아지면 80k도 추가 비교.
+
+추천 실행 명령:
+
+```bash
+cd /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai
+
+source /home/sirlab-pwd-0000/miniconda3/etc/profile.d/conda.sh
+conda activate lerobot
+
+export PYTHONPATH="${PWD}/ai/lerobot_source/lerobot/src:${PYTHONPATH:-}"
+export PYTHONUNBUFFERED=1
+export HF_HOME="${PWD}/ai/.cache/huggingface"
+export HF_DATASETS_CACHE="${HF_HOME}/datasets"
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+mkdir -p "${HF_DATASETS_CACHE}" ai/logs
+
+python ai/lerobot/run_lerobot_train.py \
+  --skip_convert \
+  --episodes_dir "${PWD}/ros2_ws/episodes/success/26.05.03_half_data_100_grasp_focus" \
+  --dataset_output_dir "${PWD}/ai/datasets/pipet_extended_depth_100_grasp_focus" \
+  --dataset_repo_id pipet_extended_depth_100_grasp_focus \
+  --job_name act_pipet_extended_depth_100_grasp_focus \
+  --steps 60000 \
+  --eval_freq 10000 \
+  --save_freq 10000 \
+  --log_freq 100 \
+  --batch_size 8 \
+  --chunk_size 40 \
+  --n_action_steps 40 \
+  --num_workers 2 \
+  --device cuda \
+  2>&1 | tee "ai/logs/train_act_pipet_extended_depth_100_grasp_focus_$(date +%Y%m%d_%H%M%S).log"
+```
+
+### 8) 참고: 사용하지 않는 중간 산출물
+
+- 이전 실험 중 생성되다 중단된 dataset:
+
+```text
+ai/datasets/pipet_extended_depth_100_keep_grasp_idle
+```
+
+- 현재 학습에는 사용하지 않음.
+- 용량은 약 14GB이며, 디스크 정리가 필요하면 별도로 삭제 가능.
+
+### 9) 2026-05-10 grasp-focus 학습 resume 및 dataloader 병목 대응
+
+#### 9-1) 초기 학습 상태
+
+- 새 dataset `pipet_extended_depth_100_grasp_focus`로 100k 학습을 시작.
+- 최초 실행은 `--num_workers 2`로 진행됨.
+- 20k 이후 로그에서 관찰:
+  - `updt_s`: 약 0.24초
+  - `data_s`: 약 2.4~2.6초
+- 해석:
+  - GPU 계산보다 dataloader/video decoding 쪽이 훨씬 느린 상태.
+  - 학습 품질 문제는 아니지만 전체 학습 시간이 길어질 가능성이 큼.
+- 기존 원본 100ep 학습은 `--num_workers 4`로 안정적으로 돌았으므로, grasp-focus 학습도 4 worker로 이어가기로 결정.
+
+#### 9-2) checkpoint 확인
+
+- 현재 checkpoint:
+
+```text
+ai/models/act_pipet_extended_depth_100_grasp_focus/checkpoints/010000
+ai/models/act_pipet_extended_depth_100_grasp_focus/checkpoints/020000
+ai/models/act_pipet_extended_depth_100_grasp_focus/checkpoints/last -> 020000
+```
+
+- 따라서 처음부터 재학습하지 않고 `020000`에서 resume하는 것이 맞음.
+
+#### 9-3) `run_lerobot_train.py` resume 지원 추가
+
+- 기존 wrapper는 `--resume` 인자를 받지 않아 아래 에러 발생:
+
+```text
+run_lerobot_train.py: error: unrecognized arguments: --resume
+```
+
+- `ai/lerobot/run_lerobot_train.py`에 추가:
+  - `--resume`
+  - `--resume_config_path`
+- 기본 resume config 경로:
+
+```text
+<output_dir>/checkpoints/last/pretrained_model/train_config.json
+```
+
+- LeRobot 내부 parser는 `--config_path 경로` 형태를 인식하지 못하고,
+  `--config_path=경로` 형태만 `parse_arg("config_path")`에서 읽는다.
+- 그래서 wrapper는 resume 시 아래처럼 넘기도록 수정:
+
+```text
+--resume=true
+--config_path=/.../checkpoints/last/pretrained_model/train_config.json
+```
+
+#### 9-4) resume 실행 명령
+
+```bash
+cd /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai
+
+source /home/sirlab-pwd-0000/miniconda3/etc/profile.d/conda.sh
+conda activate lerobot
+
+export PYTHONPATH="${PWD}/ai/lerobot_source/lerobot/src:${PYTHONPATH:-}"
+export PYTHONUNBUFFERED=1
+export HF_HOME="${PWD}/ai/.cache/huggingface"
+export HF_DATASETS_CACHE="${HF_HOME}/datasets"
+export PYTORCH_ALLOC_CONF=expandable_segments:True
+mkdir -p "${HF_DATASETS_CACHE}" ai/logs
+
+python ai/lerobot/run_lerobot_train.py \
+  --skip_convert \
+  --episodes_dir "${PWD}/ros2_ws/episodes/success/26.05.03_half_data_100_grasp_focus" \
+  --dataset_output_dir "${PWD}/ai/datasets/pipet_extended_depth_100_grasp_focus" \
+  --dataset_repo_id pipet_extended_depth_100_grasp_focus \
+  --output_dir "${PWD}/ai/models/act_pipet_extended_depth_100_grasp_focus" \
+  --job_name act_pipet_extended_depth_100_grasp_focus \
+  --resume \
+  --resume_config_path "${PWD}/ai/models/act_pipet_extended_depth_100_grasp_focus/checkpoints/last/pretrained_model/train_config.json" \
+  --steps 100000 \
+  --eval_freq 10000 \
+  --save_freq 10000 \
+  --log_freq 100 \
+  --batch_size 8 \
+  --chunk_size 40 \
+  --n_action_steps 40 \
+  --num_workers 4 \
+  --device cuda \
+  2>&1 | tee "ai/logs/train_act_pipet_extended_depth_100_grasp_focus_resume_workers4_$(date +%Y%m%d_%H%M%S).log"
+```
+
+#### 9-5) 확인 포인트
+
+- 시작 로그에서 아래를 확인:
+  - `resume=True`
+  - `checkpoint_path`가 `.../checkpoints/last` 또는 `020000` 계열을 가리킴
+  - `num_workers=4`
+- resume은 checkpoint의 기존 train config를 기반으로 하므로, CLI override가 실제 반영되는지 로그 확인이 중요.
+- step이 20k 근처에서 이어지면 정상.
