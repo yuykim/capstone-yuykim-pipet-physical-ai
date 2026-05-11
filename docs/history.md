@@ -1280,3 +1280,130 @@ python ai/lerobot/run_lerobot_train.py \
   - `num_workers=4`
 - resume은 checkpoint의 기존 train config를 기반으로 하므로, CLI override가 실제 반영되는지 로그 확인이 중요.
 - step이 20k 근처에서 이어지면 정상.
+
+---
+
+## 26.05.12 grasp-focus 080000 실기 결과 및 early-grasp 방지 패치
+
+### 1) 080000 모델 실기 결과 요약
+
+실행 모델:
+
+```text
+ai/models/act_pipet_extended_depth_100_grasp_focus/checkpoints/080000
+```
+
+관찰 결과:
+
+- 10회 시도 중 3회 성공, 7회 실패.
+- 성공한 경우도 일부는 너무 빨리 잡거나 헐겁게 잡은 느낌이 있어 완전히 안정적인 성공으로 보기는 어려움.
+- 파이펫이 로봇에 가까운 위치일 때 성공 가능성이 높았음.
+- 파이펫을 조금 옮기거나 좌우 방향으로 옮기면 실패율이 높아짐.
+- 앞뒤 방향 이동은 어느 정도 따라가지만, 좌우 위치 변화와 먼 위치 배치에 약함.
+- 70k 모델 대비 grasp-focus 데이터 효과는 분명히 있음. 적어도 파이펫 방향으로 접근하고 일부 조건에서는 실제로 잡음.
+- 하지만 핵심 실패는 여전히 "더 깊게 들어간 뒤 잡기"가 아니라 "너무 빨리 잡기"임.
+
+### 2) 갑작스러운 grasp 로그 해석
+
+실기 로그에서 아래 흐름이 확인됨.
+
+```text
+grasp delay 시작
+grasp gate 통과: confirm=8/8, delta_norm=0.0006
+grip_preset_node: grasp: [0.0, 0.0, 350.0, 350.0, 350.0, 0.0]
+Mark7SystemHardware: Tx: [0,0,350,350,350,0]
+```
+
+해석:
+
+- Mark7이 혼자 닫힌 것이 아니라, ACT 모델 출력이 `grasp`로 해석됨.
+- `inference_node`가 delay/confirm/delta gate를 통과시킨 뒤 `/gripper/grasp` 서비스를 호출함.
+- 즉 현재 문제는 하드웨어/시리얼 오동작보다는, 모델이 아직 잘못된 위치에서도 `grasp`를 내는 문제에 가까움.
+
+중요:
+
+- `use_zmq_sidecar:=true`일 때 실제로 사용되는 모델은 ROS launch의 `model_path`가 아니라, 별도 터미널에서 켠 `zmq_act_server --model-path ...` 쪽이다.
+- 따라서 ZMQ 서버 시작 로그에서 `...grasp_focus/checkpoints/080000` 또는 `pretrained_model` 경로를 실제로 물고 있는지 확인해야 한다.
+
+### 3) Early-grasp 방지 코드 추가
+
+기존 gate:
+
+```text
+grasp_delay_steps
+pre_grasp_delta_scale
+grasp_confirm_steps
+grasp_max_delta_norm
+```
+
+여기에 아래 파라미터를 추가했다.
+
+```text
+grasp_min_elapsed_steps
+grasp_min_motion_rad
+enable_gripper
+```
+
+의도:
+
+- `grasp_min_elapsed_steps`: 추론 시작 후 일정 tick 전에는 모델이 `grasp`를 내도 무조건 보류.
+- `grasp_min_motion_rad`: 시작 자세에서 관절 기준으로 일정량 이상 움직이기 전에는 grasp 보류.
+- `enable_gripper`: 디버깅용. `false`면 팔만 움직이고 Mark7 서비스 호출은 차단.
+
+수정 파일:
+
+- `ros2_ws/src/pipet_inference/pipet_inference/inference_node.py`
+  - 새 파라미터 선언
+  - `_gate_gripper_cmd()`에 최소 elapsed/motion 조건 추가
+  - `_maybe_gripper_service()`에 `enable_gripper=false` 차단 로직 추가
+- `ros2_ws/src/pipet_bringup/launch/inference.launch.py`
+  - 새 launch argument 노출
+
+### 4) 다음 실행 명령 변경
+
+기존 실행 명령에서 early-grasp 방지를 위해 아래 값을 추가/강화한다.
+
+```text
+grasp_min_elapsed_steps:=50
+grasp_min_motion_rad:=0.015
+grasp_delay_steps:=12
+grasp_confirm_steps:=12
+grasp_max_delta_norm:=0.006
+```
+
+20Hz 기준 `grasp_min_elapsed_steps:=50`은 약 2.5초이며, 시작하자마자 닫는 현상을 막기 위한 값이다.
+
+실행 명령:
+
+```bash
+./run_scripts/40_inference_ros.sh \
+  /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai/ai/models/act_pipet_extended_depth_100_grasp_focus/checkpoints/080000 \
+  192.168.1.10 \
+  /dev/ttyACM0 \
+  /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai/mujoco_env/generated/indy7_mujoco.urdf \
+  26 \
+  autonomy_enabled:=true \
+  use_zmq_sidecar:=true \
+  zmq_endpoint:=tcp://127.0.0.1:5560 \
+  image_target_height:=360 \
+  image_target_width:=480 \
+  grasp_min_elapsed_steps:=50 \
+  grasp_min_motion_rad:=0.015 \
+  grasp_delay_steps:=12 \
+  pre_grasp_delta_scale:=1.15 \
+  grasp_confirm_steps:=12 \
+  grasp_max_delta_norm:=0.006 \
+  max_joint_speed_rad_s:=0.25
+```
+
+팔 접근 경로만 확인할 때는 아래를 추가한다.
+
+```text
+enable_gripper:=false
+```
+
+튜닝 기준:
+
+- 너무 늦게 잡으면 `grasp_min_elapsed_steps`를 40으로 낮춤.
+- 아직 너무 빨리 잡으면 `grasp_min_elapsed_steps`를 60으로 올림.
+- grasp가 아예 안 나오면 `grasp_confirm_steps`를 줄이거나 `grasp_max_delta_norm`을 0.008 쪽으로 완화.
