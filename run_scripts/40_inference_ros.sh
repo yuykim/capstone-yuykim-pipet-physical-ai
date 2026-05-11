@@ -9,6 +9,8 @@ set -euo pipefail
 #   ./run_scripts/40_inference_ros.sh /path/to/checkpoints/last 192.168.1.10 /dev/ttyACM0 /ABS/indy7.urdf 26
 # grasp gate 보정 예:
 #   ./run_scripts/40_inference_ros.sh /path/to/checkpoints/100000 192.168.1.10 /dev/ttyACM0 /ABS/indy7.urdf 26 grasp_delay_steps:=8 grasp_confirm_steps:=8 grasp_max_delta_norm:=0.008
+# early-grasp 방지 예:
+#   ./run_scripts/40_inference_ros.sh /path/to/checkpoints/080000 192.168.1.10 /dev/ttyACM0 /ABS/indy7.urdf 26 grasp_min_elapsed_steps:=50 grasp_min_motion_rad:=0.015
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 

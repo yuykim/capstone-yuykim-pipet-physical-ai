@@ -112,6 +112,21 @@ def generate_launch_description():
         default_value="0.0",
         description="grasp 실행 허용 최대 관절 delta norm. 0이면 비활성. 이동 중 grasp 방지용.",
     )
+    grasp_min_elapsed_steps_arg = DeclareLaunchArgument(
+        "grasp_min_elapsed_steps",
+        default_value="0",
+        description="시작 후 이 tick 수 전에는 grasp를 보류. 20Hz에서 40은 2초.",
+    )
+    grasp_min_motion_rad_arg = DeclareLaunchArgument(
+        "grasp_min_motion_rad",
+        default_value="0.0",
+        description="시작 관절 위치 대비 이만큼 움직이기 전에는 grasp를 보류. 0이면 비활성.",
+    )
+    enable_gripper_arg = DeclareLaunchArgument(
+        "enable_gripper",
+        default_value="true",
+        description="false면 모델이 grasp/open 등을 내도 그리퍼 서비스 호출을 차단.",
+    )
     max_joint_speed_arg = DeclareLaunchArgument(
         "max_joint_speed_rad_s",
         default_value="0.0",
@@ -280,6 +295,13 @@ def generate_launch_description():
                     LaunchConfiguration("grasp_confirm_steps"), value_type=int
                 ),
                 "grasp_max_delta_norm": LaunchConfiguration("grasp_max_delta_norm"),
+                "grasp_min_elapsed_steps": ParameterValue(
+                    LaunchConfiguration("grasp_min_elapsed_steps"), value_type=int
+                ),
+                "grasp_min_motion_rad": LaunchConfiguration("grasp_min_motion_rad"),
+                "enable_gripper": ParameterValue(
+                    LaunchConfiguration("enable_gripper"), value_type=bool
+                ),
                 "max_joint_speed_rad_s": LaunchConfiguration("max_joint_speed_rad_s"),
                 "image_target_height": ParameterValue(
                     LaunchConfiguration("image_target_height"), value_type=int
@@ -325,6 +347,9 @@ def generate_launch_description():
             pre_grasp_delta_scale_arg,
             grasp_confirm_steps_arg,
             grasp_max_delta_norm_arg,
+            grasp_min_elapsed_steps_arg,
+            grasp_min_motion_rad_arg,
+            enable_gripper_arg,
             max_joint_speed_arg,
             image_target_height_arg,
             image_target_width_arg,

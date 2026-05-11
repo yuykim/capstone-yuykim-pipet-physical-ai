@@ -133,6 +133,15 @@ class InferenceNode(Node):
             "grasp_max_delta_norm",
             0.0,
         )
+        self.declare_parameter(
+            "grasp_min_elapsed_steps",
+            0,
+        )
+        self.declare_parameter(
+            "grasp_min_motion_rad",
+            0.0,
+        )
+        self.declare_parameter("enable_gripper", True)
         self.declare_parameter("image_target_height", 0)
         self.declare_parameter("image_target_width", 0)
         self.declare_parameter(
@@ -194,6 +203,14 @@ class InferenceNode(Node):
             0.0,
             float(self.get_parameter("grasp_max_delta_norm").get_parameter_value().double_value),
         )
+        self._grasp_min_elapsed_steps = max(
+            0,
+            int(self.get_parameter("grasp_min_elapsed_steps").get_parameter_value().integer_value),
+        )
+        self._grasp_min_motion_rad = max(
+            0.0,
+            float(self.get_parameter("grasp_min_motion_rad").get_parameter_value().double_value),
+        )
         img_th = int(self.get_parameter("image_target_height").get_parameter_value().integer_value)
         img_tw = int(self.get_parameter("image_target_width").get_parameter_value().integer_value)
         self._state_target_dim = int(self.get_parameter("state_target_dim").get_parameter_value().integer_value)
@@ -211,6 +228,7 @@ class InferenceNode(Node):
                 )
         self._dry_run = bool(self.get_parameter("dry_run").get_parameter_value().bool_value)
         self._autonomy_enabled = bool(self.get_parameter("autonomy_enabled").get_parameter_value().bool_value)
+        self._enable_gripper = bool(self.get_parameter("enable_gripper").get_parameter_value().bool_value)
         use_zmq = bool(self.get_parameter("use_zmq_sidecar").get_parameter_value().bool_value)
         zmq_endpoint = self.get_parameter("zmq_endpoint").get_parameter_value().string_value
 
@@ -224,6 +242,10 @@ class InferenceNode(Node):
         self._pending_grasp_ticks = 0
         self._grasp_confirm_count = 0
         self._grasp_delay_done = False
+        self._start_q: Optional[np.ndarray] = None
+        self._gripper_disabled_warned = False
+        self._grasp_elapsed_block_warn_tick = -10_000
+        self._grasp_motion_block_warn_tick = -10_000
         self._tf_buffer: Optional[Any] = None
         self._tf_listener: Optional[Any] = None
         self._fk: Optional[Any] = None
@@ -388,7 +410,10 @@ class InferenceNode(Node):
             f"grasp_delay_steps={self._grasp_delay_steps} | "
             f"pre_grasp_delta_scale={self._pre_grasp_delta_scale} | "
             f"grasp_confirm_steps={self._grasp_confirm_steps} | "
-            f"grasp_max_delta_norm={self._grasp_max_delta_norm}"
+            f"grasp_max_delta_norm={self._grasp_max_delta_norm} | "
+            f"grasp_min_elapsed_steps={self._grasp_min_elapsed_steps} | "
+            f"grasp_min_motion_rad={self._grasp_min_motion_rad} | "
+            f"enable_gripper={self._enable_gripper}"
         )
         if self._img_resize_hw is not None:
             extra += f" | image_resize={self._img_resize_hw[0]}x{self._img_resize_hw[1]}"
@@ -518,9 +543,18 @@ class InferenceNode(Node):
             gate_delta = np.clip(gate_delta, -speed_delta_limit, speed_delta_limit)
         gate_delta_norm = float(np.linalg.norm(gate_delta))
 
+        q_now = obs["observation.state"][:6].astype(np.float64)
+        if self._start_q is None:
+            self._start_q = q_now.copy()
+        motion_from_start = float(np.linalg.norm(q_now - self._start_q))
+
         g_raw = float(action[6])
         raw_g_cmd = int(np.clip(np.round(g_raw), 0, 4))
-        g_cmd, grasp_gate_active = self._gate_gripper_cmd(raw_g_cmd, gate_delta_norm)
+        g_cmd, grasp_gate_active = self._gate_gripper_cmd(
+            raw_g_cmd,
+            gate_delta_norm,
+            motion_from_start,
+        )
 
         raw6 = raw6_base
         if grasp_gate_active:
@@ -530,12 +564,12 @@ class InferenceNode(Node):
             speed_delta_limit = float(self._max_joint_speed) * float(self._period_sec)
             delta = np.clip(delta, -speed_delta_limit, speed_delta_limit)
 
-        q_now = obs["observation.state"][:6].astype(np.float64)
         q_tgt = q_now + delta
 
         if self._tick_count % 40 == 0:
             self.get_logger().info(
                 f"delta_norm={float(np.linalg.norm(delta)):.4f} "
+                f"motion_from_start={motion_from_start:.4f} "
                 f"(scale={self._action_delta_scale}) grip_raw={g_raw:.2f} "
                 f"raw_grip_cmd={raw_g_cmd} grip_cmd={g_cmd} "
                 f"grasp_pending={self._pending_grasp_ticks} "
@@ -581,12 +615,19 @@ class InferenceNode(Node):
         self._publish_joint_targets(q_tgt)
         self._maybe_gripper_service(g_cmd)
 
-    def _gate_gripper_cmd(self, raw_cmd: int, delta_norm: float) -> tuple[int, bool]:
+    def _gate_gripper_cmd(
+        self,
+        raw_cmd: int,
+        delta_norm: float,
+        motion_from_start: float,
+    ) -> tuple[int, bool]:
         """Hold grasp until the command is stable and the arm is near a settled target."""
         if (
             self._grasp_delay_steps <= 0
             and self._grasp_confirm_steps <= 0
             and self._grasp_max_delta_norm <= 0.0
+            and self._grasp_min_elapsed_steps <= 0
+            and self._grasp_min_motion_rad <= 0.0
         ):
             return raw_cmd, False
         if self._last_grip_cmd == GRIP_GRASP:
@@ -603,6 +644,27 @@ class InferenceNode(Node):
             self._grasp_confirm_count = 0
             self._grasp_delay_done = False
             return raw_cmd, False
+
+        if self._tick_count < self._grasp_min_elapsed_steps:
+            if self._tick_count - self._grasp_elapsed_block_warn_tick >= 20:
+                self._grasp_elapsed_block_warn_tick = self._tick_count
+                self.get_logger().info(
+                    f"grasp gate 보류: elapsed={self._tick_count}/"
+                    f"{self._grasp_min_elapsed_steps} ticks"
+                )
+            return self._last_grip_cmd, True
+
+        if (
+            self._grasp_min_motion_rad > 0.0
+            and motion_from_start < self._grasp_min_motion_rad
+        ):
+            if self._tick_count - self._grasp_motion_block_warn_tick >= 20:
+                self._grasp_motion_block_warn_tick = self._tick_count
+                self.get_logger().info(
+                    f"grasp gate 보류: motion_from_start={motion_from_start:.4f} "
+                    f"< {self._grasp_min_motion_rad:.4f}"
+                )
+            return self._last_grip_cmd, True
 
         if self._pending_grasp_ticks > 0:
             self._pending_grasp_ticks -= 1
@@ -658,6 +720,11 @@ class InferenceNode(Node):
 
     def _maybe_gripper_service(self, cmd: int) -> None:
         if cmd == self._last_grip_cmd:
+            return
+        if not self._enable_gripper:
+            if not self._gripper_disabled_warned:
+                self._gripper_disabled_warned = True
+                self.get_logger().warn("enable_gripper=false: 그리퍼 서비스 호출을 차단합니다.")
             return
         if cmd == GRIP_HOLD:
             self._last_grip_cmd = cmd
