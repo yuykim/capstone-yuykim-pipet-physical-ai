@@ -92,11 +92,7 @@ sudo apt install ros-humble-rmw-cyclonedds-cpp ros-humble-moveit \
   ros-humble-realsense2-camera
 
 # Python
-pip3 install neuromeka numpy opencv-python
-
-# 서브모듈 초기화 (최초 1회)
-cd /home/sirlab/Dev/ROS2/pipet-physical-ai
-git submodule update --init --recursive
+pip3 install neuromeka numpy opencv-python pygame
 ```
 
 ### 2. 빌드
@@ -120,33 +116,40 @@ source /opt/ros/humble/setup.bash && source install/setup.bash
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 ros2 launch pipet_bringup data_collection.launch.py indy_ip:=192.168.1.10
 
-# 터미널 2: 키보드 텔레옵
+# 터미널 2: Pygame 키보드 텔레옵 + 그리퍼 + 녹화 제어
 cd ~/Dev/ROS2/pipet-physical-ai
 source /opt/ros/humble/setup.bash && source install/setup.bash
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-ros2 run pipet_system_teleop system_teleop_node
+ros2 run pipet_system_teleop keyboard_servo_node
 ```
 
-**텔레옵 키 매핑 (D/d 외 대소문자 무관):**
+**키보드 텔레옵 키 매핑:**
 
 | 키 | 동작 |
 |----|------|
-| SPACE | 녹화 시작/중지 (중지 시 Y/N으로 성공/실패 라벨링) |
+| W / S | x +/− |
+| A / D | y +/− |
+| Q / E | z +/− |
+| U / O | rx +/− |
+| I / K | ry +/− |
+| J / L | rz +/− |
+| `[` / `]` | Cartesian step 감소/증가 |
 | H | Indy7 홈 포지션 |
-| D / d | 직접 교시 ON / OFF |
 | G | Mark7 잡기 (Grasp) |
-| O | Mark7 펴기 (Open) |
-| P | Mark7 누르기 (Press) — 잡은 상태 유지하며 엄지만 누름 |
-| R | Mark7 엄지 펴기 (Release) — 잡은 상태 유지하며 엄지만 펴기 |
-| E | 에러 복구 + 교시 재개 |
-| S | 상태 표시 |
-| Q | 종료 |
+| F | Mark7 펴기 (Open) |
+| B | Mark7 누르기 (Press) |
+| V | Mark7 엄지 펴기 (Release) |
+| Ctrl+S | 에러 복구 |
+| P | Teleop 정지 |
+| SPACE | 녹화 시작/중지 |
+| Y / N / X | 성공 저장 / 실패 저장 / 폐기 |
+| ESC | 종료 |
 
 **녹화 워크플로우:**
-1. `D`로 직접 교시 ON
+1. Pygame 창 활성화
 2. `SPACE`로 녹화 시작
-3. 로봇 팔을 움직이며 G/O/P/R로 그리퍼 조작
-4. `SPACE`로 녹화 중지 → `Y`(성공) 또는 `N`(실패) 입력
+3. W/S/A/D/Q/E/U/O/I/K/J/L로 로봇 팔 조작 + G/F/B/V로 그리퍼 조작
+4. `SPACE`로 녹화 중지 → `Y`(성공), `N`(실패), `X`(폐기) 입력
 5. NPZ 저장 완료 후 경로 표시 (대용량이므로 저장에 시간이 걸릴 수 있음)
 
 **데이터 수집 성능:** ~20Hz, 640x480 원본 해상도, 에피소드당 ~1GB/분

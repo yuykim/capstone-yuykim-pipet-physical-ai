@@ -1,352 +1,380 @@
 #!/usr/bin/env python3
 """
-Keyboard Servo Node for Indy7 (Neuromeka-style + gripper).
+Pygame keyboard teleop node for Indy7 + Mark7 data collection.
 
-Publishes:
-    /indy/teleop_pose   Float64MultiArray  - Cartesian target [mm, deg]
-    /indy/teleop_joint  Float64MultiArray  - Joint target [deg]
+This node follows the working control_indy7 pattern:
+  - start Indy task teleop in RELATIVE mode
+  - keep a cumulative relative target [x,y,z,rx,ry,rz]
+  - while a key is held, update that target at 30 Hz
+  - publish it to /indy/teleop_pose for the Indy driver to execute with
+    movetelel_rel()
 
-Calls:
-    indy_srv            (Home / Zero / Recover / TeleopStop)
-    /gripper/{grasp,open,press,release}
-
-Key layout (Neuromeka standard + gripper):
-
-  Cartesian jog (workspace):
-    Up / Down arrow         -> x +/-
-    Left / Right arrow      -> y +/-
-    .  /  ;                 -> z +/-
-    N  /  M  /  ,           -> rx (U) / ry (V) / rz (W) jog (direction by [R])
-
-  Joint jog:
-    1 / 2 / 3 / 4 / 5 / 6 / 7  -> joint 1~7 (direction by [R])
-
-  Frame:
-    W / E                   -> Global (base) / Tool frame for Cartesian jog
-
-  Speed:
-    -, +                    -> joint step size (deg) down/up
-    9, 0                    -> Cartesian step size (mm, deg) down/up
-    R                       -> Toggle jog direction (+1 <-> -1)
-
-  Indy7 commands (via indy_srv):
-    H                       -> Move Home
-    Z                       -> Move Zero
-    S                       -> Recover (clear error)
-    P                       -> Stop teleop
-
-  Mark7 gripper:
-    G                       -> Grasp
-    O                       -> Open
-    B                       -> Press (Button)
-    V                       -> Release (thumb open)
-
-  Quit:
-    Q
+It also calls Mark7 gripper services and data collector services so the
+Pygame window can stay focused during collection.
 """
 
-import sys
-import termios
-import tty
-import select
+import time
+
+import pygame
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float64MultiArray
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool, Float64MultiArray
 from std_srvs.srv import Trigger
 from indy_interfaces.srv import IndyService
 
 
-# Default step sizes
-LINEAR_STEP_MM = 5.0
-ANGULAR_STEP_DEG = 2.0
+ROBOT_CONTROL_HZ = 30
+LINEAR_STEP_MM = 0.5
+ANGULAR_STEP_DEG = 0.5
 JOINT_STEP_DEG = 1.0
 
-# Indy7 service command codes (must match indy_define.py)
 MSG_RECOVER = 1
 MSG_MOVE_HOME = 2
 MSG_MOVE_ZERO = 3
+MSG_TELE_TASK_RLT = 5
+MSG_TELE_JOINT_RLT = 7
 MSG_TELE_STOP = 8
 
-
-class KeyboardReader:
-    """Reads single keys including arrow keys (escape sequences)."""
-
-    ARROW_MAP = {'A': 'UP', 'B': 'DOWN', 'C': 'RIGHT', 'D': 'LEFT'}
-
-    def __init__(self):
-        if not sys.stdin.isatty():
-            raise RuntimeError('stdin is not a TTY')
-        self.fd = sys.stdin.fileno()
-        self.settings = termios.tcgetattr(self.fd)
-        # cbreak: read each char without Enter, but keep output processing
-        # (so newlines still produce CRLF, no staircase output).
-        tty.setcbreak(self.fd)
-
-    def read_one(self) -> str:
-        """
-        Returns:
-            - single character for normal keys
-            - 'UP'|'DOWN'|'LEFT'|'RIGHT' for arrow keys
-            - '' if no input
-        """
-        # First wait for any byte
-        rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
-        if not rlist:
-            return ''
-        ch = sys.stdin.read(1)
-        if ch != '\x1b':
-            return ch
-        # ESC: try to read up to 2 follow-up bytes within a slightly larger window.
-        # Some terminals send the 3 bytes of arrow keys with small gaps; 50ms is safer.
-        rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
-        if not rlist:
-            return ch  # lone ESC
-        ch2 = sys.stdin.read(1)
-        if ch2 != '[':
-            return ch + ch2
-        rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
-        if not rlist:
-            return ch + ch2
-        ch3 = sys.stdin.read(1)
-        return self.ARROW_MAP.get(ch3, ch + ch2 + ch3)
-
-    def restore(self):
-        termios.tcsetattr(self.fd, termios.TCSADRAIN, self.settings)
+ACTION_HOLD = 0
+ACTION_GRASP = 1
+ACTION_OPEN = 2
+ACTION_PRESS = 3
+ACTION_RELEASE = 4
 
 
 class KeyboardServoNode(Node):
     def __init__(self):
         super().__init__('keyboard_servo_node')
 
-        # Publishers
         self.pose_pub = self.create_publisher(Float64MultiArray, '/indy/teleop_pose', 10)
         self.joint_pub = self.create_publisher(Float64MultiArray, '/indy/teleop_joint', 10)
 
-        # Subscribers
         self.create_subscription(Float64MultiArray, '/indy/ee_pose', self._ee_pose_cb, 10)
-        from sensor_msgs.msg import JointState
         self.create_subscription(JointState, '/joint_states', self._joint_state_cb, 10)
+        self.create_subscription(Bool, '/data_collector/is_recording', self._recording_cb, 1)
 
-        # Service clients
         self.indy_srv = self.create_client(IndyService, 'indy_srv')
+
         self.gripper_grasp = self.create_client(Trigger, '/gripper/grasp')
         self.gripper_open = self.create_client(Trigger, '/gripper/open')
         self.gripper_press = self.create_client(Trigger, '/gripper/press')
         self.gripper_release = self.create_client(Trigger, '/gripper/release')
+
         self.log_grasp = self.create_client(Trigger, '/data_collector/log_grasp')
         self.log_open = self.create_client(Trigger, '/data_collector/log_open')
         self.log_press = self.create_client(Trigger, '/data_collector/log_press')
         self.log_release = self.create_client(Trigger, '/data_collector/log_release')
 
-        # State
-        self.ee_pose = None         # latest Cartesian pose [x,y,z,rx,ry,rz]
-        self.target_pose = None     # target to publish on /indy/teleop_pose
-        self.joint_positions = None # latest joint positions in rad (from /joint_states)
-        self.target_joint_deg = None  # target to publish on /indy/teleop_joint
+        self.data_start = self.create_client(Trigger, '/data_collector/start')
+        self.data_stop = self.create_client(Trigger, '/data_collector/stop')
+        self.data_mark_success = self.create_client(Trigger, '/data_collector/mark_success')
+        self.data_mark_fail = self.create_client(Trigger, '/data_collector/mark_fail')
+        self.data_discard = self.create_client(Trigger, '/data_collector/discard')
+
+        self.ee_pose = None
+        self.joint_positions_deg = None
+        self.relative_pose = [0.0] * 6
+        self.relative_joint = None
 
         self.linear_step = LINEAR_STEP_MM
         self.angular_step = ANGULAR_STEP_DEG
         self.joint_step = JOINT_STEP_DEG
-        self.direction = 1          # toggled by R key (used for N/M/, and 1-7)
-        self.frame = 'base'         # 'base' or 'tool' (Tool frame transform not yet implemented)
-
+        self.teleop_mode = None
+        self.is_recording = False
+        self.awaiting_label = False
         self.is_running = True
-        self.keyboard = KeyboardReader()
+
+        self._init_pygame()
+        self._wait_for_indy_service()
         self._print_help()
 
-    # -- Subscribers --
+    def _init_pygame(self):
+        pygame.init()
+        self.screen = pygame.display.set_mode((640, 360))
+        pygame.display.set_caption('Pipet Keyboard Teleop - Indy7 + Mark7')
+        self.clock = pygame.time.Clock()
+        self.font = pygame.font.SysFont(None, 24)
+
+    def _wait_for_indy_service(self):
+        self.get_logger().info('Waiting for indy_srv...')
+        while rclpy.ok() and not self.indy_srv.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('indy_srv not available, waiting...')
+        self.get_logger().info('indy_srv connected')
+
+    def _print_help(self):
+        print('\n' + '=' * 72)
+        print('  PYGAME KEYBOARD TELEOP - control_indy7 style')
+        print('=' * 72)
+        print('  Move:       W/S=x +/-   A/D=y +/-   Q/E=z +/-')
+        print('  Rotate:     U/O=rx +/-  I/K=ry +/-  J/L=rz +/-')
+        print('  Step:       [ / ] cartesian step down/up')
+        print('  Indy7:      H=home   Z=zero   Ctrl+S=recover   P=stop teleop')
+        print('  Gripper:    G=grasp  F=open   B=press     V=release')
+        print('  Recording:  SPACE=start/label stop, then Y=success N=fail X=discard')
+        print('  Quit:       ESC or window close')
+        print('=' * 72 + '\n')
+
     def _ee_pose_cb(self, msg: Float64MultiArray):
         if len(msg.data) == 6:
             self.ee_pose = list(msg.data)
-            if self.target_pose is None:
-                self.target_pose = list(self.ee_pose)
 
-    def _joint_state_cb(self, msg):
-        # rad -> deg
+    def _joint_state_cb(self, msg: JointState):
         import math
-        self.joint_positions = [math.degrees(p) for p in msg.position]
-        if self.target_joint_deg is None and self.joint_positions:
-            self.target_joint_deg = list(self.joint_positions)
+        self.joint_positions_deg = [math.degrees(p) for p in msg.position]
+        if self.relative_joint is None:
+            self.relative_joint = [0.0] * len(self.joint_positions_deg)
 
-    # -- Help --
-    def _print_help(self):
-        print('\n' + '=' * 64)
-        print('  KEYBOARD SERVO (Neuromeka standard + gripper)')
-        print('=' * 64)
-        print('  Cartesian jog (workspace):')
-        print('    UP / DOWN          -> x +/-')
-        print('    LEFT / RIGHT       -> y +/-')
-        print('    .  /  ;            -> z +/-')
-        print('    N  /  M  /  ,      -> rx / ry / rz  (direction by [R])')
-        print('  Joint jog:')
-        print('    1  2  3  4  5  6  7   -> joint i  (direction by [R])')
-        print('  Frame toggle:')
-        print('    W -> base (global)   E -> tool')
-        print('  Speed (step size):')
-        print('    -, +    joint deg down/up')
-        print('    9, 0    Cartesian (mm, deg) down/up')
-        print('    R       jog direction toggle (+/-)')
-        print('  Indy7 commands:')
-        print('    H = Home    Z = Zero    S = Recover    P = Stop teleop')
-        print('  Mark7 gripper:')
-        print('    G = Grasp   O = Open    B = Press      V = Release')
-        print('  Quit:')
-        print('    Q')
-        print()
-        print(f'  step: linear={self.linear_step:.1f}mm '
-              f'angular={self.angular_step:.1f}deg joint={self.joint_step:.1f}deg '
-              f'dir={self.direction:+d} frame={self.frame}')
-        print('=' * 64 + '\n')
+    def _recording_cb(self, msg: Bool):
+        self.is_recording = msg.data
 
-    # -- Helpers --
-    def _call_trigger(self, client, timeout=2.0):
+    def _call_trigger(self, client, timeout=5.0):
         if not client.service_is_ready():
             self.get_logger().warn(f'Service not ready: {client.srv_name}')
-            return
+            return False
         future = client.call_async(Trigger.Request())
         rclpy.spin_until_future_complete(self, future, timeout_sec=timeout)
+        result = future.result()
+        if result is None:
+            self.get_logger().error(f'{client.srv_name}: timeout')
+            return False
+        if not result.success:
+            self.get_logger().warn(f'{client.srv_name}: {result.message}')
+        return result.success
 
     def _call_indy(self, code: int, timeout=10.0):
         if not self.indy_srv.service_is_ready():
             self.get_logger().warn('indy_srv not available')
-            return
+            return False
         req = IndyService.Request()
         req.data = code
         future = self.indy_srv.call_async(req)
         rclpy.spin_until_future_complete(self, future, timeout_sec=timeout)
+        result = future.result()
+        if result is None:
+            self.get_logger().error(f'indy_srv cmd={code}: timeout')
+            return False
+        if not result.success:
+            self.get_logger().warn(f'indy_srv cmd={code}: {result.message}')
+        return result.success
 
-    # -- Cartesian jog --
-    def _step_cartesian(self, axis: int, sign: int):
-        if self.target_pose is None:
-            self.get_logger().warn('Waiting for /indy/ee_pose...')
-            return
-        step = self.linear_step if axis < 3 else self.angular_step
-        delta = sign * step
-        # TODO: tool frame transform when frame == 'tool'
-        self.target_pose[axis] += delta
+    def _ensure_task_teleop(self):
+        if self.teleop_mode == 'task':
+            return True
+        if self._call_indy(MSG_TELE_TASK_RLT):
+            self.teleop_mode = 'task'
+            self.relative_pose = [0.0] * 6
+            return True
+        return False
+
+    def _ensure_joint_teleop(self):
+        if self.teleop_mode == 'joint':
+            return True
+        if self._call_indy(MSG_TELE_JOINT_RLT):
+            self.teleop_mode = 'joint'
+            if self.relative_joint is not None:
+                self.relative_joint = [0.0] * len(self.relative_joint)
+            return True
+        return False
+
+    def _reset_teleop_targets(self):
+        self.teleop_mode = None
+        self.relative_pose = [0.0] * 6
+        if self.relative_joint is not None:
+            self.relative_joint = [0.0] * len(self.relative_joint)
+
+    def _publish_pose(self):
         msg = Float64MultiArray()
-        msg.data = list(self.target_pose)
+        msg.data = list(self.relative_pose)
         self.pose_pub.publish(msg)
-        labels = ['x', 'y', 'z', 'rx', 'ry', 'rz']
-        unit = 'mm' if axis < 3 else 'deg'
-        print(f'  {labels[axis]} {sign:+d}{step:.2f}{unit} -> {self.target_pose[axis]:.2f}')
 
-    # -- Joint jog --
-    def _step_joint(self, joint_idx: int, sign: int):
-        if self.target_joint_deg is None:
+    def _publish_joint(self):
+        if self.relative_joint is None:
             self.get_logger().warn('Waiting for /joint_states...')
             return
-        if joint_idx >= len(self.target_joint_deg):
-            self.get_logger().warn(f'joint{joint_idx} out of range')
-            return
-        self.target_joint_deg[joint_idx] += sign * self.joint_step
         msg = Float64MultiArray()
-        msg.data = list(self.target_joint_deg)
+        msg.data = list(self.relative_joint)
         self.joint_pub.publish(msg)
-        print(f'  joint{joint_idx} {sign:+d}{self.joint_step:.2f}deg -> '
-              f'{self.target_joint_deg[joint_idx]:.2f}')
 
-    # -- Main loop --
+    def _handle_gripper(self, action: int):
+        if action == ACTION_GRASP:
+            print('Gripper: GRASP')
+            self._call_trigger(self.gripper_grasp)
+            self._call_trigger(self.log_grasp)
+        elif action == ACTION_OPEN:
+            print('Gripper: OPEN')
+            self._call_trigger(self.gripper_open)
+            self._call_trigger(self.log_open)
+        elif action == ACTION_PRESS:
+            print('Gripper: PRESS')
+            self._call_trigger(self.gripper_press)
+            self._call_trigger(self.log_press)
+        elif action == ACTION_RELEASE:
+            print('Gripper: RELEASE')
+            self._call_trigger(self.gripper_release)
+            self._call_trigger(self.log_release)
+
+    def _handle_record_key(self):
+        if self.is_recording:
+            self.awaiting_label = True
+            print('Result? Y=success / N=fail / X=discard')
+            return
+        print('Starting recording...')
+        self._call_trigger(self.data_start)
+
+    def _finish_recording(self, label_key: str):
+        self.awaiting_label = False
+        if label_key == 'x':
+            print('Discarding recording...')
+            self._call_trigger(self.data_discard)
+            return
+
+        if label_key == 'y':
+            print('Marking SUCCESS and saving...')
+            self._call_trigger(self.data_mark_success)
+        else:
+            print('Marking FAIL and saving...')
+            self._call_trigger(self.data_mark_fail)
+
+        self._call_trigger(self.data_stop, timeout=300.0)
+
+    def _handle_keydown(self, event):
+        key = event.key
+
+        if self.awaiting_label:
+            if key == pygame.K_y:
+                self._finish_recording('y')
+            elif key == pygame.K_n:
+                self._finish_recording('n')
+            elif key == pygame.K_x:
+                self._finish_recording('x')
+            return
+
+        if key == pygame.K_ESCAPE:
+            self.is_running = False
+        elif key == pygame.K_LEFTBRACKET:
+            self.linear_step = max(0.1, self.linear_step - 0.1)
+            self.angular_step = max(0.1, self.angular_step - 0.1)
+            print(f'cart step -> linear={self.linear_step:.1f}mm angular={self.angular_step:.1f}deg')
+        elif key == pygame.K_RIGHTBRACKET:
+            self.linear_step += 0.1
+            self.angular_step += 0.1
+            print(f'cart step -> linear={self.linear_step:.1f}mm angular={self.angular_step:.1f}deg')
+        elif key == pygame.K_SPACE:
+            self._handle_record_key()
+        elif key == pygame.K_h:
+            if not self.is_recording:
+                print('Indy7: HOME')
+                self._call_indy(MSG_MOVE_HOME, timeout=15.0)
+                self._reset_teleop_targets()
+        elif key == pygame.K_z:
+            if not self.is_recording:
+                print('Indy7: ZERO')
+                self._call_indy(MSG_MOVE_ZERO, timeout=15.0)
+                self._reset_teleop_targets()
+        elif key == pygame.K_s and (pygame.key.get_mods() & pygame.KMOD_CTRL):
+            print('Indy7: RECOVER')
+            self._call_indy(MSG_RECOVER)
+            self._reset_teleop_targets()
+        elif key == pygame.K_p:
+            print('Indy7: STOP TELEOP')
+            self._call_indy(MSG_TELE_STOP)
+            self._reset_teleop_targets()
+        elif key == pygame.K_g:
+            self._handle_gripper(ACTION_GRASP)
+        elif key == pygame.K_f:
+            self._handle_gripper(ACTION_OPEN)
+        elif key == pygame.K_b:
+            self._handle_gripper(ACTION_PRESS)
+        elif key == pygame.K_v:
+            self._handle_gripper(ACTION_RELEASE)
+
+    def _update_cartesian_from_keys(self):
+        if self.awaiting_label:
+            return
+
+        keys = pygame.key.get_pressed()
+        deltas = [0.0] * 6
+
+        if keys[pygame.K_w]:
+            deltas[0] += self.linear_step
+        if keys[pygame.K_s]:
+            deltas[0] -= self.linear_step
+        if keys[pygame.K_a]:
+            deltas[1] += self.linear_step
+        if keys[pygame.K_d]:
+            deltas[1] -= self.linear_step
+        if keys[pygame.K_q]:
+            deltas[2] += self.linear_step
+        if keys[pygame.K_e]:
+            deltas[2] -= self.linear_step
+
+        if keys[pygame.K_u]:
+            deltas[3] += self.angular_step
+        if keys[pygame.K_o]:
+            deltas[3] -= self.angular_step
+        if keys[pygame.K_i]:
+            deltas[4] += self.angular_step
+        if keys[pygame.K_k]:
+            deltas[4] -= self.angular_step
+        if keys[pygame.K_j]:
+            deltas[5] += self.angular_step
+        if keys[pygame.K_l]:
+            deltas[5] -= self.angular_step
+
+        if not any(deltas):
+            return
+
+        if not self._ensure_task_teleop():
+            return
+
+        self.relative_pose = [
+            self.relative_pose[i] + deltas[i] for i in range(6)
+        ]
+        self._publish_pose()
+
+    def _update_screen(self):
+        self.screen.fill((20, 24, 28))
+        lines = [
+            'Pipet Keyboard Teleop',
+            f'cart step: {self.linear_step:.1f} mm / {self.angular_step:.1f} deg',
+            f'teleop mode: {self.teleop_mode or "idle"}',
+            f'recording: {"YES" if self.is_recording else "NO"}',
+            'Move W/S A/D Q/E | Rotate U/O I/K J/L',
+            'Gripper G=grasp F=open B=press V=release',
+            'SPACE=start/stop, then Y/N/X label | Ctrl+S=recover | ESC=quit',
+        ]
+        if self.awaiting_label:
+            lines.append('WAITING LABEL: Y success / N fail / X discard')
+        for idx, line in enumerate(lines):
+            color = (240, 240, 240) if idx != 3 else ((80, 220, 120) if self.is_recording else (220, 220, 120))
+            surf = self.font.render(line, True, color)
+            self.screen.blit(surf, (24, 24 + idx * 34))
+        pygame.display.flip()
+
     def run(self):
         try:
             while self.is_running and rclpy.ok():
                 rclpy.spin_once(self, timeout_sec=0.0)
-                key = self.keyboard.read_one()
-                if not key:
-                    continue
 
-                # Cartesian translation
-                if key == 'UP':
-                    self._step_cartesian(0, +1)
-                elif key == 'DOWN':
-                    self._step_cartesian(0, -1)
-                elif key == 'LEFT':
-                    self._step_cartesian(1, +1)
-                elif key == 'RIGHT':
-                    self._step_cartesian(1, -1)
-                elif key == '.':
-                    self._step_cartesian(2, +1)
-                elif key == ';':
-                    self._step_cartesian(2, -1)
-                # Cartesian rotation UVW (direction toggled by R)
-                elif key == 'N' or key == 'n':
-                    self._step_cartesian(3, self.direction)
-                elif key == 'M' or key == 'm':
-                    self._step_cartesian(4, self.direction)
-                elif key == ',':
-                    self._step_cartesian(5, self.direction)
-                # Joint jog (direction toggled by R)
-                elif key in '1234567':
-                    j = int(key) - 1
-                    self._step_joint(j, self.direction)
-                # Frame toggle
-                elif key == 'W' or key == 'w':
-                    self.frame = 'base'
-                    print('  frame -> BASE (global)')
-                elif key == 'E' or key == 'e':
-                    self.frame = 'tool'
-                    print('  frame -> TOOL (note: tool transform not yet applied)')
-                # Direction toggle
-                elif key == 'R' or key == 'r':
-                    self.direction *= -1
-                    print(f'  direction -> {self.direction:+d}')
-                # Joint speed
-                elif key == '-' or key == '_':
-                    self.joint_step = max(0.1, self.joint_step / 1.5)
-                    print(f'  joint_step -> {self.joint_step:.2f}deg')
-                elif key == '+' or key == '=':
-                    self.joint_step *= 1.5
-                    print(f'  joint_step -> {self.joint_step:.2f}deg')
-                # Cartesian speed
-                elif key == '9':
-                    self.linear_step = max(0.1, self.linear_step / 1.5)
-                    self.angular_step = max(0.1, self.angular_step / 1.5)
-                    print(f'  cart step -> linear={self.linear_step:.2f}mm '
-                          f'angular={self.angular_step:.2f}deg')
-                elif key == '0':
-                    self.linear_step *= 1.5
-                    self.angular_step *= 1.5
-                    print(f'  cart step -> linear={self.linear_step:.2f}mm '
-                          f'angular={self.angular_step:.2f}deg')
-                # Indy7 commands
-                elif key == 'H' or key == 'h':
-                    print('  cmd: Move Home')
-                    self._call_indy(MSG_MOVE_HOME, timeout=15.0)
-                elif key == 'Z' or key == 'z':
-                    print('  cmd: Move Zero')
-                    self._call_indy(MSG_MOVE_ZERO, timeout=15.0)
-                elif key == 'S' or key == 's':
-                    print('  cmd: Recover')
-                    self._call_indy(MSG_RECOVER)
-                elif key == 'P' or key == 'p':
-                    print('  cmd: Stop teleop')
-                    self._call_indy(MSG_TELE_STOP)
-                # Gripper
-                elif key == 'G' or key == 'g':
-                    print('  gripper: GRASP')
-                    self._call_trigger(self.gripper_grasp)
-                    self._call_trigger(self.log_grasp)
-                elif key == 'O' or key == 'o':
-                    print('  gripper: OPEN')
-                    self._call_trigger(self.gripper_open)
-                    self._call_trigger(self.log_open)
-                elif key == 'B' or key == 'b':
-                    print('  gripper: PRESS')
-                    self._call_trigger(self.gripper_press)
-                    self._call_trigger(self.log_press)
-                elif key == 'V' or key == 'v':
-                    print('  gripper: RELEASE')
-                    self._call_trigger(self.gripper_release)
-                    self._call_trigger(self.log_release)
-                # Quit
-                elif key == 'Q' or key == 'q':
-                    self.is_running = False
-                    break
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        self.is_running = False
+                    elif event.type == pygame.KEYDOWN:
+                        self._handle_keydown(event)
+
+                self._update_cartesian_from_keys()
+                self._update_screen()
+                self.clock.tick(ROBOT_CONTROL_HZ)
+
         except KeyboardInterrupt:
             pass
         finally:
-            self.keyboard.restore()
+            if self.is_recording:
+                self._call_trigger(self.data_stop, timeout=300.0)
+            self._call_indy(MSG_TELE_STOP)
+            pygame.quit()
 
 
 def main(args=None):
