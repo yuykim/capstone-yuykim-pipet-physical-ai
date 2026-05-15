@@ -30,33 +30,39 @@ Indy7 로봇팔 + Mark7 로봇손 + RealSense D435(손목/오버헤드) 2대를 
 
 ### 2-0. 네트워크 설정 (최초 1회)
 
-Indy7(IP: `192.168.1.10`)과 통신하려면 PC에 같은 대역의 IP를 설정해야 한다.
+Indy7(`192.168.1.10`)과 통신하려면 PC에 같은 대역의 고정 IP를 설정해야 한다.
 
 **방법 A: USB 이더넷 어댑터 직접 연결 (권장)**
 ```bash
-# 영구 설정 (재부팅 후에도 유지)
 sudo nmcli con mod enx00e04c360046 ipv4.addresses 192.168.1.100/24 ipv4.method manual
 sudo nmcli con up enx00e04c360046
-
-# 확인
 ping 192.168.1.10
 ```
 
+> `unknown connection` 오류 시, 기존 connection 수정 대신 새 connection을 생성:
+> ```bash
+> sudo nmcli con add type ethernet ifname enx00e04c360046 con-name indy7-static \
+>   ipv4.addresses 192.168.1.100/24 ipv4.method manual \
+>   ipv6.method ignore autoconnect yes
+> sudo nmcli con up indy7-static
+> ```
+
 **방법 B: 공유기 경유 연결**
 
-로봇과 PC를 같은 공유기에 연결한 후, PC 내장 이더넷에 로봇 대역 IP를 추가한다.
+로봇과 PC를 같은 공유기에 연결한 후, PC 내장 이더넷(`enp0s31f6`)에 로봇 대역 IP를 추가한다.
 ```bash
-# 임시 설정 (재부팅 시 사라짐)
+
+# 임시 설정 (재부팅 시 사라짐) 이거 먼저 해주세요
 sudo ip addr add 192.168.1.100/24 dev enp0s31f6
 
 # 영구 설정
 sudo nmcli con mod enp0s31f6 +ipv4.addresses 192.168.1.100/24
 
-# 확인
+# 이걸로 연결 확인
 ping 192.168.1.10
 ```
 
-> **트러블슈팅:** ping 실패 → ① 로봇 컨트롤러 전원 확인 ② 케이블 확인 ③ `ip addr show`에서 IP 할당 확인. gRPC 포트 실패(`nc -zv 192.168.1.10 20001`) → 컨트롤러 재부팅 후 2~3분 대기.
+> **트러블슈팅:** ping 실패 → ① 로봇 컨트롤러 전원 ② 케이블 ③ `ip addr show`에서 IP 할당 확인. gRPC 실패(`nc -zv 192.168.1.10 20001`) → 컨트롤러 재부팅 후 2~3분 대기.
 
 ### 2-1. 빌드
 ```bash
@@ -67,6 +73,7 @@ colcon build
 source install/setup.bash
 ```
 
+# 여기 보고 터미널 두개 열어서 각각 실행하면 됩니다!!!!
 ### 2-2. 통합 수집 실행
 터미널 1 (백엔드):
 ```bash
@@ -87,7 +94,7 @@ ros2 run pipet_system_teleop system_teleop_node
 ### 2-3. 텔레옵 키
 | 키 | 동작 |
 |---|---|
-| SPACE | 녹화 시작/중지 (중지 시 Y/N 라벨링) |
+| SPACE | 녹화 시작/중지 (중지 시 Y/N 라벨링) 
 | D / d | direct teaching ON/OFF |
 | H | Indy7 홈 이동 |
 | G / O / P / R | Mark7 grasp/open/press/release |
