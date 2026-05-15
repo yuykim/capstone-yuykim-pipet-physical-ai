@@ -7,18 +7,18 @@
   - joint_positions: (N, 6)
   - joint_velocities: (N, 6)
   - joint_efforts: (N, 6)
+  - ee_poses: (N, 6) Indy native [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]
   - wrist_rgb_images: (N, H, W, 3) uint8
-  - wrist_depth_images: (N, H, W) uint16  (baseline 변환에서는 미사용)
   - overhead_rgb_images: (N, H, W, 3) uint8
-  - overhead_depth_images: (N, H, W) uint16 (baseline 변환에서는 미사용)
   - gripper_actions: (N,) int8 (0=유지, 1=잡기, 2=펴기, 3=누르기, 4=엄지 펴기)
   - success: () bool (옵션) 또는 episode_success
 
-출력 LeRobotDataset( ACT baseline 기준 ) feature 매핑:
-  - observation.images.front     : wrist_rgb_images[t]
-  - observation.images.overhead  : overhead_rgb_images[t]
-  - observation.state            : [q, dq, tau] concat (18차원)
-  - action                       : [delta_q, gripper_action] concat (7차원)
+출력 LeRobotDataset feature 매핑 (--camera, --action_space로 조절):
+  - observation.image            : (선택된 카메라) wrist 또는 overhead RGB
+  - observation.state            : [q, dq, tau, ee_pose] concat (24차원)
+  - action                       : action_space에 따라
+      cartesian: [delta_ee_pose(6), gripper(1)] = 7차원 (movetelel 학습용)
+      joint:     [delta_q(6), gripper(1)] = 7차원 (movetelej 학습용)
 
 설계/주의사항:
   - 원본 `timestamps[t]`를 프레임에 **일부러 저장하지 않는다.**
@@ -71,28 +71,26 @@ def _derive_fps_from_timestamps(timestamps: np.ndarray) -> int:
     return max(1, fps)
 
 
-def _build_features(h: int, w: int) -> dict[str, dict[str, Any]]:
-    # LeRobot의 dataset feature spec에서 이미지 shape는 (H, W, C)로 정의한다.
-    # 실제 프레임 값은 HWC/CHW 모두 받아들이지만, 우리는 NPZ가 HWC이므로 그대로 사용한다.
+def _build_features(
+    h: int, w: int, camera: str, action_space: str
+) -> dict[str, dict[str, Any]]:
+    """
+    camera: 'wrist' | 'overhead' | 'both'
+    action_space: 'cartesian' | 'joint'
+    """
     image_shape = (h, w, 3)  # HWC
     state_names = (
         [f"joint_positions_{i}" for i in range(6)]
         + [f"joint_velocities_{i}" for i in range(6)]
         + [f"joint_efforts_{i}" for i in range(6)]
+        + [f"ee_pose_{label}" for label in ['x', 'y', 'z', 'rx', 'ry', 'rz']]
     )
-    action_names = [f"delta_q_{i}" for i in range(6)] + ["gripper_action"]
+    if action_space == 'cartesian':
+        action_names = [f"delta_ee_{label}" for label in ['x', 'y', 'z', 'rx', 'ry', 'rz']] + ["gripper_action"]
+    else:
+        action_names = [f"delta_q_{i}" for i in range(6)] + ["gripper_action"]
 
-    return {
-        "observation.images.front": {
-            "dtype": "image",
-            "shape": image_shape,
-            "names": ["height", "width", "channels"],
-        },
-        "observation.images.overhead": {
-            "dtype": "image",
-            "shape": image_shape,
-            "names": ["height", "width", "channels"],
-        },
+    features: dict[str, dict[str, Any]] = {
         "observation.state": {
             "dtype": "float32",
             "shape": (len(state_names),),
@@ -104,6 +102,19 @@ def _build_features(h: int, w: int) -> dict[str, dict[str, Any]]:
             "names": action_names,
         },
     }
+    if camera in ('wrist', 'both'):
+        features["observation.images.wrist"] = {
+            "dtype": "image",
+            "shape": image_shape,
+            "names": ["height", "width", "channels"],
+        }
+    if camera in ('overhead', 'both'):
+        features["observation.images.overhead"] = {
+            "dtype": "image",
+            "shape": image_shape,
+            "names": ["height", "width", "channels"],
+        }
+    return features
 
 
 def main() -> None:
@@ -121,6 +132,18 @@ def main() -> None:
     )
     parser.add_argument("--max_episodes", type=int, default=0, help="0 means no limit.")
     parser.add_argument("--image_resize_to", type=str, default="", help="Optional HxW resize, e.g. 480x640.")
+    parser.add_argument(
+        "--camera",
+        choices=["wrist", "overhead", "both"],
+        default="wrist",
+        help="Which camera(s) to include as observation. Default: wrist.",
+    )
+    parser.add_argument(
+        "--action_space",
+        choices=["cartesian", "joint"],
+        default="cartesian",
+        help="Action space: cartesian=delta_ee_pose (movetelel) | joint=delta_q (movetelej).",
+    )
     args = parser.parse_args()
 
     episodes_dir = Path(args.episodes_dir)
@@ -139,8 +162,6 @@ def main() -> None:
     # - 카메라 해상도 결정
     # - fps가 0이면 timestamps로부터 추정
     with np.load(episode_files[0]) as ep0:
-        wrist_rgb0 = ep0["wrist_rgb_images"]
-        overhead_rgb0 = ep0["overhead_rgb_images"]
         q0 = ep0["joint_positions"]
         dq0 = ep0["joint_velocities"]
         tau0 = ep0["joint_efforts"]
@@ -151,18 +172,31 @@ def main() -> None:
                 f"joint_positions={q0.shape}, joint_velocities={dq0.shape}, joint_efforts={tau0.shape}"
             )
 
-        # wrist_rgb_images: (N, H, W, 3)
-        if wrist_rgb0.ndim != 4 or wrist_rgb0.shape[-1] != 3:
-            raise ValueError(f"Expected wrist_rgb_images shape (N,H,W,3). Got: {wrist_rgb0.shape}")
-        if overhead_rgb0.ndim != 4 or overhead_rgb0.shape[-1] != 3:
-            raise ValueError(f"Expected overhead_rgb_images shape (N,H,W,3). Got: {overhead_rgb0.shape}")
-
-        h, w = int(wrist_rgb0.shape[1]), int(wrist_rgb0.shape[2])
-        if (h, w) != (int(overhead_rgb0.shape[1]), int(overhead_rgb0.shape[2])):
-            raise ValueError(
-                "wrist_rgb_images and overhead_rgb_images must share (H,W). "
-                f"Got wrist={(wrist_rgb0.shape[1], wrist_rgb0.shape[2])} overhead={(overhead_rgb0.shape[1], overhead_rgb0.shape[2])}"
+        if "ee_poses" not in ep0.files:
+            raise KeyError(
+                "First episode missing 'ee_poses' key. "
+                "Re-collect data with the updated data_collector."
             )
+
+        # Pick reference camera for image shape
+        if args.camera in ('wrist', 'both'):
+            ref_rgb = ep0["wrist_rgb_images"]
+        else:
+            ref_rgb = ep0["overhead_rgb_images"]
+        if ref_rgb.ndim != 4 or ref_rgb.shape[-1] != 3:
+            raise ValueError(f"Expected RGB shape (N,H,W,3). Got: {ref_rgb.shape}")
+
+        h, w = int(ref_rgb.shape[1]), int(ref_rgb.shape[2])
+
+        # If using both cameras, verify shape match
+        if args.camera == 'both':
+            other_rgb = ep0["overhead_rgb_images"]
+            if (h, w) != (int(other_rgb.shape[1]), int(other_rgb.shape[2])):
+                raise ValueError(
+                    "wrist and overhead images must share (H,W). "
+                    f"Got wrist={(ref_rgb.shape[1], ref_rgb.shape[2])} "
+                    f"overhead={(other_rgb.shape[1], other_rgb.shape[2])}"
+                )
 
         # fps를 지정하지 않았으면(0) 첫 에피소드 기반으로 추정한다.
         # 한 번 정한 fps는 동일 데이터셋 내에서 고정한다.
@@ -187,7 +221,7 @@ def main() -> None:
         rh, rw = h, w
         cv2 = None  # type: ignore
 
-    features = _build_features(h=h, w=w)
+    features = _build_features(h=h, w=w, camera=args.camera, action_space=args.action_space)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -231,8 +265,14 @@ def main() -> None:
             joint_positions = ep["joint_positions"].astype(np.float32)
             joint_velocities = ep["joint_velocities"].astype(np.float32)
             joint_efforts = ep["joint_efforts"].astype(np.float32)
-            wrist_rgb_images = ep["wrist_rgb_images"].astype(np.uint8)
-            overhead_rgb_images = ep["overhead_rgb_images"].astype(np.uint8)
+            if "ee_poses" not in ep.files:
+                raise KeyError(
+                    f"{ep_path}: missing 'ee_poses' key. "
+                    "Re-collect data with the updated data_collector."
+                )
+            ee_poses = ep["ee_poses"].astype(np.float32)
+            wrist_rgb_images = ep["wrist_rgb_images"].astype(np.uint8) if args.camera in ('wrist', 'both') else None
+            overhead_rgb_images = ep["overhead_rgb_images"].astype(np.uint8) if args.camera in ('overhead', 'both') else None
             gripper_actions = ep["gripper_actions"]
 
         n = joint_positions.shape[0]
@@ -245,27 +285,29 @@ def main() -> None:
             q_t = joint_positions[t]  # (6,)
             dq_t = joint_velocities[t]
             tau_t = joint_efforts[t]
+            ee_t = ee_poses[t]  # (6,)
 
-            delta_q = joint_positions[t + 1] - joint_positions[t]  # (6,)
+            if args.action_space == 'cartesian':
+                delta_action = ee_poses[t + 1] - ee_poses[t]  # (6,) Cartesian delta
+            else:
+                delta_action = joint_positions[t + 1] - joint_positions[t]  # (6,) joint delta
             gripper_cmd = float(gripper_actions[t])
 
-            state_vec = np.concatenate([q_t, dq_t, tau_t], axis=0).astype(np.float32)
-            action_vec = np.concatenate([delta_q, np.array([gripper_cmd], dtype=np.float32)], axis=0).astype(
-                np.float32
-            )
+            state_vec = np.concatenate([q_t, dq_t, tau_t, ee_t], axis=0).astype(np.float32)
+            action_vec = np.concatenate(
+                [delta_action, np.array([gripper_cmd], dtype=np.float32)], axis=0
+            ).astype(np.float32)
 
-            wrist_rgb_t = maybe_resize_rgb(wrist_rgb_images[t])
-            overhead_rgb_t = maybe_resize_rgb(overhead_rgb_images[t])
-
-            # LeRobotDataset은 프레임마다 `task` 문자열을 요구한다.
-            # 추후 task-conditioned 학습(다중 task) 확장 시 그대로 활용 가능.
-            frame = {
+            frame: dict[str, Any] = {
                 "task": args.task,
                 "observation.state": state_vec,
-                "observation.images.front": wrist_rgb_t,
-                "observation.images.overhead": overhead_rgb_t,
                 "action": action_vec,
             }
+            if wrist_rgb_images is not None:
+                frame["observation.images.wrist"] = maybe_resize_rgb(wrist_rgb_images[t])
+            if overhead_rgb_images is not None:
+                frame["observation.images.overhead"] = maybe_resize_rgb(overhead_rgb_images[t])
+
             dataset.add_frame(frame)
 
         # episode 1개 = demonstration trajectory 1개로 저장한다.

@@ -91,6 +91,7 @@ class SystemTeleopNode(Node):
         self.data_mark_fail = self.create_client(Trigger, '/data_collector/mark_fail')
         self.data_discard = self.create_client(Trigger, '/data_collector/discard')
 
+
         # Service clients -- Data collector gripper action logging
         self.log_grasp = self.create_client(Trigger, '/data_collector/log_grasp')
         self.log_open = self.create_client(Trigger, '/data_collector/log_open')
@@ -106,6 +107,7 @@ class SystemTeleopNode(Node):
 
         # State
         self._teaching_enabled = False
+        self._current_mode = 'hand'  # 'hand' | 'keyboard'
         self.is_running = True
 
         # Keyboard
@@ -142,8 +144,11 @@ class SystemTeleopNode(Node):
 
     def _print_instructions(self):
         print('\n' + '=' * 60)
-        print('  PIPET SYSTEM TELEOP - Indy7 + Mark7')
+        print('  PIPET SYSTEM TELEOP - Indy7 + Mark7 (movetelel)')
         print('=' * 60)
+        print('\n  Mode (toggle):')
+        print('    [1]  Direct teaching (hand-guided)')
+        print('    [2]  Keyboard servo  (run keyboard_servo_node in another terminal)')
         print('\n  Recording:')
         print('    [SPACE]  Start/Stop recording')
         print('\n  Indy7:')
@@ -160,7 +165,8 @@ class SystemTeleopNode(Node):
         print('    [S]  Show status')
         print('    [Q]  Quit')
         print('\n  Status:')
-        print(f'    Teaching: {"ON" if self._teaching_enabled else "OFF"}')
+        print(f'    Mode:      {self._current_mode}')
+        print(f'    Teaching:  {"ON" if self._teaching_enabled else "OFF"}')
         print(f'    Recording: {"YES" if self._is_recording else "NO"}')
         print('=' * 60 + '\n')
 
@@ -221,11 +227,26 @@ class SystemTeleopNode(Node):
                 print('Saving data (this may take a moment)...')
                 req = Trigger.Request()
                 future = self.data_stop.call_async(req)
-                rclpy.spin_until_future_complete(self, future, timeout_sec=120.0)
-                if future.result() is not None and future.result().success:
-                    print(f'{future.result().message}\n')
+                rclpy.spin_until_future_complete(self, future, timeout_sec=300.0)
+                if future.done():
+                    res = future.result()
+                    if res is not None and res.success:
+                        print(f'{res.message}\n')
+                    else:
+                        msg = res.message if res is not None else 'no response'
+                        print(f'Stop returned failure: {msg}\n')
                 else:
-                    print('Failed to stop recording.\n')
+                    # Future not yet done — save likely still in progress on backend.
+                    # Poll a bit longer before giving up so we don't wrongly report failure.
+                    print('Stop response not yet received, polling...')
+                    extra = 60.0
+                    rclpy.spin_until_future_complete(self, future, timeout_sec=extra)
+                    if future.done() and future.result() is not None and future.result().success:
+                        print(f'{future.result().message}\n')
+                    else:
+                        print(
+                            'Stop response timed out. Check episodes/ to verify the file was saved.\n'
+                        )
         else:
             print('\nStarting recording...')
             if self._call_trigger(self.data_start):
@@ -307,9 +328,37 @@ class SystemTeleopNode(Node):
             print('  Failed to re-enable teaching mode.\n')
         print('-' * 60 + '\n')
 
+    def _set_mode(self, mode: str):
+        """Switch input mode. 'hand' enables direct teaching; 'keyboard' disables it."""
+        if self._is_recording:
+            self.get_logger().warn('Cannot switch mode while recording')
+            return
+        if mode == self._current_mode:
+            print(f'Already in {mode} mode.\n')
+            return
+        print(f'\nSwitching mode: {self._current_mode} -> {mode}')
+        if mode == 'hand':
+            if not self._teaching_enabled:
+                if self._call_indy(MSG_DIRECT_TEACHING_ON):
+                    self._teaching_enabled = True
+                    print('Direct teaching ON. Move robot by hand.\n')
+                else:
+                    print('Failed to enable direct teaching.\n')
+                    return
+        else:
+            if self._teaching_enabled:
+                if self._call_indy(MSG_DIRECT_TEACHING_OFF):
+                    self._teaching_enabled = False
+                else:
+                    print('Failed to disable direct teaching.\n')
+                    return
+            print(f'{mode} mode active. Use keyboard_servo_node to move the robot.\n')
+        self._current_mode = mode
+
     def _handle_status(self):
         print('\n' + '-' * 40)
-        print(f'  Teaching: {"ON" if self._teaching_enabled else "OFF"}')
+        print(f'  Mode:      {self._current_mode}')
+        print(f'  Teaching:  {"ON" if self._teaching_enabled else "OFF"}')
         print(f'  Recording: {"YES" if self._is_recording else "NO"}')
         mark7 = 'connected' if self.gripper_grasp.service_is_ready() else 'not available'
         data = 'connected' if self.data_start.service_is_ready() else 'not available'
@@ -339,6 +388,10 @@ class SystemTeleopNode(Node):
 
                 if key == ' ':
                     self._handle_space()
+                elif key == '1':
+                    self._set_mode('hand')
+                elif key == '2':
+                    self._set_mode('keyboard')
                 elif key_upper == 'H':
                     self._handle_home()
                 elif key_upper == 'D' and key == 'D':

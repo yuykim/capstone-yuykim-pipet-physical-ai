@@ -8,8 +8,11 @@ Starts:
   3. RealSense D435 cameras (wrist + overhead)
   4. Data collector node (synchronized recording)
 
-After launch, run the teleop node in a separate terminal:
+After launch, run the master teleop node in a separate terminal:
   ros2 run pipet_system_teleop system_teleop_node
+
+For keyboard servo (movetelel) input, run in another TTY terminal:
+  ros2 run pipet_system_teleop keyboard_servo_node
 """
 
 from launch import LaunchDescription
@@ -96,12 +99,12 @@ def generate_launch_description():
         parameters=[{
             'serial_no': '_844212071939',
             'enable_color': True,
-            'enable_depth': True,
+            'enable_depth': False,
             'enable_infra1': False,
             'enable_infra2': False,
             'enable_gyro': False,
             'enable_accel': False,
-            'align_depth.enable': True,
+            'align_depth.enable': False,
             'pointcloud.enable': False,
         }],
     )
@@ -116,12 +119,12 @@ def generate_launch_description():
         parameters=[{
             'serial_no': '_317222074298',
             'enable_color': True,
-            'enable_depth': True,
+            'enable_depth': False,
             'enable_infra1': False,
             'enable_infra2': False,
             'enable_gyro': False,
             'enable_accel': False,
-            'align_depth.enable': True,
+            'align_depth.enable': False,
             'pointcloud.enable': False,
         }],
     )
