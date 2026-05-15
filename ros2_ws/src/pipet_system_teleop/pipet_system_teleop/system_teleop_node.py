@@ -29,6 +29,11 @@ MSG_DIRECT_TEACHING_ON = 9
 MSG_DIRECT_TEACHING_OFF = 10
 MSG_MOVE_SAFE = 11
 
+DEFAULT_INDY_IP = '192.168.1.10'
+HOME_JOINT_DEG = [0.0, 50.0, -130.0, 90.0, 0.0, 0.0]
+HOME_VEL_RATIO = 20
+HOME_ACC_RATIO = 100
+
 
 class KeyboardReader:
     """Non-blocking keyboard input reader."""
@@ -74,6 +79,11 @@ class SystemTeleopNode(Node):
 
     def __init__(self):
         super().__init__('system_teleop_node')
+
+        self.declare_parameter('indy_ip', DEFAULT_INDY_IP)
+        self.indy_ip = (
+            self.get_parameter('indy_ip').get_parameter_value().string_value
+        )
 
         # Service clients -- Indy7
         self.indy_srv = self.create_client(IndyService, 'indy_srv')
@@ -152,7 +162,7 @@ class SystemTeleopNode(Node):
         print('\n  Recording:')
         print('    [SPACE]  Start/Stop recording')
         print('\n  Indy7:')
-        print('    [H]  Home position')
+        print(f'    [H]  Home position {HOME_JOINT_DEG} deg')
         print('    [D]  Direct teaching ON')
         print('    [d]  Direct teaching OFF')
         print('    [E]  Error recovery + resume teaching')
@@ -258,10 +268,22 @@ class SystemTeleopNode(Node):
         if self._is_recording:
             self.get_logger().warn('Cannot move to home while recording')
             return
-        print('\nMoving to home position...')
-        if self._call_indy(MSG_MOVE_HOME, timeout=15.0):
+        print(f'\nMoving to home position: {HOME_JOINT_DEG} deg')
+        if self._teaching_enabled:
+            self._call_indy(MSG_DIRECT_TEACHING_OFF)
+            self._teaching_enabled = False
+        try:
+            from neuromeka import IndyDCP3
+            indy = IndyDCP3(robot_ip=self.indy_ip, index=0)
+            indy.movej(
+                jtarget=HOME_JOINT_DEG,
+                vel_ratio=HOME_VEL_RATIO,
+                acc_ratio=HOME_ACC_RATIO,
+            )
+            indy.wait_for_motion_state('is_target_reached')
             print('Home position reached.\n')
-        else:
+        except Exception as exc:
+            self.get_logger().error(f'Failed to move to home: {exc}')
             print('Failed to move to home.\n')
 
     def _handle_teaching_on(self):

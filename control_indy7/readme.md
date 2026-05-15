@@ -41,6 +41,7 @@
 | --- | --- |
 | `indy7_keyboard_control_v1.py` | **메인 제어 코드**. Pygame 기반 6축 키보드 제어 수행 |
 | `indy7_start.py` | 로봇의 상태를 확인하고 실행 가능 여부를 체크하는 코드 |
+| `read_joint_state.py` | 현재 관절값(`q`)과 TCP pose(`p`)를 터미널에 출력 |
 | `check_teleop.py` | 텔레오퍼레이션(Teleop) 모드가 활성화 가능한지 확인 |
 | `error.py` | 로봇 에러 발생 시 초기화 및 복구(Recover) 수행 |
 | `indy7_shutdown.py` | 로봇을 홈 포지션으로 이동시킨 후 모터를 안전하게 잠금 |
@@ -71,7 +72,7 @@
 | --- | --- | --- |
 | **보폭 증가** | `]` | 이동 간격(STEP)을 0.1mm/deg 씩 증가 |
 | **보폭 감소** | `[` | 이동 간격(STEP)을 0.1mm/deg 씩 감소 (최소 0.1) |
-| **홈 이동** | `SPACE` | 미리 설정된 초기 위치(`target_pos`)로 복귀 |
+| **홈 이동** | `SPACE` / `H` | 홈 관절 위치 `[0, 50, -130, 90, 0, 0] deg`로 복귀 |
 | **프로그램 종료** | `ESC` | 텔레옵 모드 종료 후 프로그램 안전하게 닫기 |
 
 ---
@@ -90,14 +91,26 @@ pip install pygame neuromeka
 * `indy7_start.py`를 실행하여 통신 상태를 확인합니다.
 
 
-3. **제어 코드 실행**:
+3. **현재 관절값 확인**:
 ```bash
-python indy7_keyboard_control_v1.py
+/usr/bin/python3 read_joint_state.py
+
+# 계속 보기
+/usr/bin/python3 read_joint_state.py --watch --hz 5
+
+# radian 값도 같이 보기
+/usr/bin/python3 read_joint_state.py --rad
+```
+
+
+4. **제어 코드 실행**:
+```bash
+/usr/bin/python3 indy7_keyboard_control_v1.py
 
 ```
 
 
-4. **조작**: 생성된 Pygame 윈도우 창이 활성화된 상태에서 위 표의 키를 입력하여 로봇을 조작합니다.
+5. **조작**: 생성된 Pygame 윈도우 창이 활성화된 상태에서 위 표의 키를 입력하여 로봇을 조작합니다.
 
 ---
 

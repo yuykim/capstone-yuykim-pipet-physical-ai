@@ -29,6 +29,10 @@ ROBOT_CONTROL_HZ = 30
 LINEAR_STEP_MM = 0.5
 ANGULAR_STEP_DEG = 0.5
 JOINT_STEP_DEG = 1.0
+DEFAULT_INDY_IP = '192.168.1.10'
+HOME_JOINT_DEG = [0.0, 50.0, -130.0, 90.0, 0.0, 0.0]
+HOME_VEL_RATIO = 20
+HOME_ACC_RATIO = 100
 
 MSG_RECOVER = 1
 MSG_MOVE_HOME = 2
@@ -47,6 +51,11 @@ ACTION_RELEASE = 4
 class KeyboardServoNode(Node):
     def __init__(self):
         super().__init__('keyboard_servo_node')
+
+        self.declare_parameter('indy_ip', DEFAULT_INDY_IP)
+        self.indy_ip = (
+            self.get_parameter('indy_ip').get_parameter_value().string_value
+        )
 
         self.pose_pub = self.create_publisher(Float64MultiArray, '/indy/teleop_pose', 10)
         self.joint_pub = self.create_publisher(Float64MultiArray, '/indy/teleop_joint', 10)
@@ -110,7 +119,7 @@ class KeyboardServoNode(Node):
         print('  Move:       W/S=x +/-   A/D=y +/-   Q/E=z +/-')
         print('  Rotate:     U/O=rx +/-  I/K=ry +/-  J/L=rz +/-')
         print('  Step:       [ / ] cartesian step down/up')
-        print('  Indy7:      H=home   Z=zero   Ctrl+S=recover   P=stop teleop')
+        print(f'  Indy7:      H=home {HOME_JOINT_DEG} deg   Z=zero   Ctrl+S=recover   P=stop teleop')
         print('  Gripper:    G=grasp  F=open   B=press     V=release')
         print('  Recording:  SPACE=start/label stop, then Y=success N=fail X=discard')
         print('  Quit:       ESC or window close')
@@ -158,6 +167,26 @@ class KeyboardServoNode(Node):
         if not result.success:
             self.get_logger().warn(f'indy_srv cmd={code}: {result.message}')
         return result.success
+
+    def _move_home(self):
+        try:
+            from neuromeka import IndyDCP3
+        except ModuleNotFoundError:
+            self.get_logger().error('neuromeka package not found; cannot move home')
+            return False
+
+        print(f'Indy7: HOME -> {HOME_JOINT_DEG} deg')
+        self._call_indy(MSG_TELE_STOP)
+        indy = IndyDCP3(robot_ip=self.indy_ip, index=0)
+        indy.movej(
+            jtarget=HOME_JOINT_DEG,
+            vel_ratio=HOME_VEL_RATIO,
+            acc_ratio=HOME_ACC_RATIO,
+        )
+        indy.wait_for_motion_state('is_target_reached')
+        self._reset_teleop_targets()
+        print('Indy7: HOME reached')
+        return True
 
     def _ensure_task_teleop(self):
         if self.teleop_mode == 'task':
@@ -265,9 +294,7 @@ class KeyboardServoNode(Node):
             self._handle_record_key()
         elif key == pygame.K_h:
             if not self.is_recording:
-                print('Indy7: HOME')
-                self._call_indy(MSG_MOVE_HOME, timeout=15.0)
-                self._reset_teleop_targets()
+                self._move_home()
         elif key == pygame.K_z:
             if not self.is_recording:
                 print('Indy7: ZERO')
@@ -343,7 +370,7 @@ class KeyboardServoNode(Node):
             f'recording: {"YES" if self.is_recording else "NO"}',
             'Move W/S A/D Q/E | Rotate U/O I/K J/L',
             'Gripper G=grasp F=open B=press V=release',
-            'SPACE=start/stop, then Y/N/X label | Ctrl+S=recover | ESC=quit',
+            'H=home | SPACE=start/stop, then Y/N/X label | Ctrl+S=recover | ESC=quit',
         ]
         if self.awaiting_label:
             lines.append('WAITING LABEL: Y success / N fail / X discard')
