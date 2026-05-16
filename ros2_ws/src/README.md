@@ -38,6 +38,24 @@ ping 192.168.1.10
 > **트러블슈팅:** `ping 192.168.1.10` 실패 시 → ① 로봇 컨트롤러 전원 확인 ② 이더넷 케이블 확인 ③ `ip addr show enx00e04c360046`에서 IP 할당 확인.
 > gRPC 포트 연결 실패(`nc -zv 192.168.1.10 20001`) → 로봇 컨트롤러 재부팅 후 2~3분 대기.
 
+#### 공유기 경유 연결 (대안)
+
+USB 이더넷 어댑터 없이, 로봇과 PC를 같은 공유기에 연결하는 방법.
+PC 내장 이더넷(`enp0s31f6` 등)에 로봇 대역 IP를 추가로 할당한다.
+
+```bash
+# 임시 설정 (재부팅 시 사라짐)
+sudo ip addr add 192.168.1.100/24 dev enp0s31f6
+
+# 영구 설정
+sudo nmcli con mod enp0s31f6 +ipv4.addresses 192.168.1.100/24
+
+# 확인
+ping 192.168.1.10
+```
+
+> 공유기가 L2 스위치 역할로 패킷을 전달해야 동작한다. 로봇이 공유기 DHCP 대역(예: `192.168.0.x`)과 다른 고정 IP(`192.168.1.10`)를 쓰기 때문에 PC에 두 번째 IP를 추가하는 방식이다.
+
 > **sirlab public laptop 네트워크 설정 메모 (이번에 성공한 방법)**
 >
 > 로봇 이더넷 인터페이스는 `enx00e04c360046` 였지만, `nmcli con mod enx00e04c360046 ...` 는 “unknown connection” 오류가 났습니다.
@@ -74,11 +92,7 @@ sudo apt install ros-humble-rmw-cyclonedds-cpp ros-humble-moveit \
   ros-humble-realsense2-camera
 
 # Python
-pip3 install neuromeka numpy opencv-python
-
-# 서브모듈 초기화 (최초 1회)
-cd /home/sirlab/Dev/ROS2/pipet-physical-ai
-git submodule update --init --recursive
+pip3 install neuromeka numpy opencv-python pygame
 ```
 
 ### 2. 빌드
@@ -102,33 +116,40 @@ source /opt/ros/humble/setup.bash && source install/setup.bash
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 ros2 launch pipet_bringup data_collection.launch.py indy_ip:=192.168.1.10
 
-# 터미널 2: 키보드 텔레옵
+# 터미널 2: Pygame 키보드 텔레옵 + 그리퍼 + 녹화 제어
 cd ~/Dev/ROS2/pipet-physical-ai
 source /opt/ros/humble/setup.bash && source install/setup.bash
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-ros2 run pipet_system_teleop system_teleop_node
+ros2 run pipet_system_teleop keyboard_servo_node
 ```
 
-**텔레옵 키 매핑 (D/d 외 대소문자 무관):**
+**키보드 텔레옵 키 매핑:**
 
 | 키 | 동작 |
 |----|------|
-| SPACE | 녹화 시작/중지 (중지 시 Y/N으로 성공/실패 라벨링) |
+| W / S | x +/− |
+| A / D | y +/− |
+| Q / E | z +/− |
+| U / O | rx +/− |
+| I / K | ry +/− |
+| J / L | rz +/− |
+| `[` / `]` | Cartesian step 감소/증가 |
 | H | Indy7 홈 포지션 |
-| D / d | 직접 교시 ON / OFF |
 | G | Mark7 잡기 (Grasp) |
-| O | Mark7 펴기 (Open) |
-| P | Mark7 누르기 (Press) — 잡은 상태 유지하며 엄지만 누름 |
-| R | Mark7 엄지 펴기 (Release) — 잡은 상태 유지하며 엄지만 펴기 |
-| E | 에러 복구 + 교시 재개 |
-| S | 상태 표시 |
-| Q | 종료 |
+| F | Mark7 펴기 (Open) |
+| B | Mark7 누르기 (Press) |
+| V | Mark7 엄지 펴기 (Release) |
+| Ctrl+S | 에러 복구 |
+| P | Teleop 정지 |
+| SPACE | 녹화 시작/중지 |
+| Y / N / X | 성공 저장 / 실패 저장 / 폐기 |
+| ESC | 종료 |
 
 **녹화 워크플로우:**
-1. `D`로 직접 교시 ON
+1. Pygame 창 활성화
 2. `SPACE`로 녹화 시작
-3. 로봇 팔을 움직이며 G/O/P/R로 그리퍼 조작
-4. `SPACE`로 녹화 중지 → `Y`(성공) 또는 `N`(실패) 입력
+3. W/S/A/D/Q/E/U/O/I/K/J/L로 로봇 팔 조작 + G/F/B/V로 그리퍼 조작
+4. `SPACE`로 녹화 중지 → `Y`(성공), `N`(실패), `X`(폐기) 입력
 5. NPZ 저장 완료 후 경로 표시 (대용량이므로 저장에 시간이 걸릴 수 있음)
 
 **데이터 수집 성능:** ~20Hz, 640x480 원본 해상도, 에피소드당 ~1GB/분
@@ -172,6 +193,8 @@ ros2 launch pipet_hand_mark7_driver mark7_hardware.launch.py use_mock_hardware:=
 | 키 | Shape | dtype | 설명 |
 |----|-------|-------|------|
 | timestamps | (N,) | float64 | 녹화 시작 기준 상대 시간 |
+| home_joint_deg | (6,) | float32 | 수집 당시 홈 포지션 metadata, 학습 변환 제외 |
+| camera_setup | () | str | 카메라 구성 metadata, 학습 변환 제외 |
 | joint_positions | (N, 6) | float32 | Indy7 관절 각도 (rad) |
 | joint_velocities | (N, 6) | float32 | Indy7 관절 속도 (rad/s) |
 | joint_efforts | (N, 6) | float32 | Indy7 관절 토크 (N·m) |
@@ -179,8 +202,7 @@ ros2 launch pipet_hand_mark7_driver mark7_hardware.launch.py use_mock_hardware:=
 | wrist_depth_images | (N, 480, 640) | uint16 | 손목 카메라 Depth (mm) |
 | overhead_rgb_images | (N, 480, 640, 3) | uint8 | 오버헤드 카메라 RGB |
 | overhead_depth_images | (N, 480, 640) | uint16 | 오버헤드 카메라 Depth (mm) |
-| gripper_actions | (N,) | int8 | 0=유지, 1=잡기, 2=펴기, 3=누르기, 4=엄지 펴기 |
-| success | () | bool | 에피소드 성공 여부 |
+| gripper_actions | (N,) | int8 | 모드: 0=유지, 1=잡기, 2=펴기, 3=누르기, 4=엄지 펴기 |
 
 ---
 

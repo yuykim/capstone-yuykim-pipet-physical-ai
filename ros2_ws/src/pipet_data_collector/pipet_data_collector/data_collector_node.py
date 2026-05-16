@@ -2,9 +2,10 @@
 """
 Data Collector Node for Pipet Physical AI.
 
-Subscribes to Indy7 joint states, two RealSense D435 cameras (wrist + overhead),
-and Mark7 gripper status.
-Synchronizes all data using ApproximateTimeSynchronizer and saves episodes as NPZ.
+Subscribes to Indy7 joint states, two RealSense D435 cameras RGB streams
+(wrist + overhead), Mark7 gripper status, and Indy7 EE pose.
+Synchronizes joint+RGB topics using ApproximateTimeSynchronizer and saves
+episodes as NPZ. Depth streams are no longer collected.
 """
 
 import os
@@ -18,7 +19,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 from sensor_msgs.msg import JointState, Image
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float64MultiArray
 from std_srvs.srv import Trigger
 from pipet_hand_mark7_msgs.msg import GripperStatus
 
@@ -41,11 +42,19 @@ class DataCollectorNode(Node):
         # Parameters
         self.declare_parameter('output_dir', 'episodes')
         self.declare_parameter('sync_slop', 1.0)
+        self.declare_parameter('home_joint_deg', [0.00, 25.00, -115.000, 90.0, 0.00, 0.000])
+        self.declare_parameter('camera_setup', 'wrist+overhead_rgb')
 
         self.output_dir = os.path.expanduser(
             self.get_parameter('output_dir').get_parameter_value().string_value
         )
         sync_slop = self.get_parameter('sync_slop').get_parameter_value().double_value
+        self.home_joint_deg = list(
+            self.get_parameter('home_joint_deg').get_parameter_value().double_array_value
+        )
+        self.camera_setup = (
+            self.get_parameter('camera_setup').get_parameter_value().string_value
+        )
 
         os.makedirs(self.output_dir, exist_ok=True)
         self.get_logger().info(f'Output directory: {self.output_dir}')
@@ -61,8 +70,8 @@ class DataCollectorNode(Node):
         # Data buffers
         self._clear_buffers()
 
-        # Gripper action tracking
-        # 0=hold, 1=grasp, 2=open, 3=press, 4=release
+        # Gripper action mode.
+        # 0=hold, 1=grasp, 2=open, 3=press, 4=release.
         self._current_gripper_action: int = 0
 
         # Episode result (True=success, False=fail, None=unmarked)
@@ -115,45 +124,45 @@ class DataCollectorNode(Node):
             self._gripper_status_cb, 10
         )
 
-        # Synchronized subscribers (5-topic sync, without gripper)
+        # EE pose (task pose) - separate subscriber, latest cached
+        # Format: [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg] - Indy native
+        self._latest_ee_pose = None
+        self.create_subscription(
+            Float64MultiArray, '/indy/ee_pose',
+            self._ee_pose_cb, 10
+        )
+
+        # Synchronized subscribers (3-topic sync: joint + 2x RGB; depth dropped)
         self.joint_sub = message_filters.Subscriber(
             self, JointState, '/joint_states'
         )
         self.wrist_rgb_sub = message_filters.Subscriber(
             self, Image, '/wrist_camera/camera/color/image_raw'
         )
-        self.wrist_depth_sub = message_filters.Subscriber(
-            self, Image, '/wrist_camera/camera/aligned_depth_to_color/image_raw'
-        )
         self.overhead_rgb_sub = message_filters.Subscriber(
             self, Image, '/overhead_camera/camera/color/image_raw'
         )
-        self.overhead_depth_sub = message_filters.Subscriber(
-            self, Image, '/overhead_camera/camera/aligned_depth_to_color/image_raw'
-        )
 
         self.sync = message_filters.ApproximateTimeSynchronizer(
-            [self.joint_sub,
-             self.wrist_rgb_sub, self.wrist_depth_sub,
-             self.overhead_rgb_sub, self.overhead_depth_sub],
+            [self.joint_sub, self.wrist_rgb_sub, self.overhead_rgb_sub],
             queue_size=10,
             slop=sync_slop,
         )
         self.sync.registerCallback(self._sync_callback)
 
-        self.get_logger().info('DataCollectorNode initialized (5-topic sync + gripper cache)')
+        self.get_logger().info('DataCollectorNode initialized (3-topic sync + gripper/ee_pose cache)')
 
     def _clear_buffers(self):
         """Clear all data buffers."""
         self.timestamps: List[float] = []
+        self.joint_names: List[str] = []
         self.joint_positions: List[List[float]] = []
         self.joint_velocities: List[List[float]] = []
         self.joint_efforts: List[List[float]] = []
         self.wrist_rgb_images: List[np.ndarray] = []
-        self.wrist_depth_images: List[np.ndarray] = []
         self.overhead_rgb_images: List[np.ndarray] = []
-        self.overhead_depth_images: List[np.ndarray] = []
         self.gripper_actions: List[int] = []
+        self.ee_poses: List[List[float]] = []
 
     # -- Service callbacks --
 
@@ -206,25 +215,25 @@ class DataCollectorNode(Node):
     def _log_grasp_callback(self, request, response):
         self._current_gripper_action = 1
         response.success = True
-        response.message = 'Gripper action set to GRASP'
+        response.message = 'Gripper action mode set to GRASP'
         return response
 
     def _log_open_callback(self, request, response):
         self._current_gripper_action = 2
         response.success = True
-        response.message = 'Gripper action set to OPEN'
+        response.message = 'Gripper action mode set to OPEN'
         return response
 
     def _log_press_callback(self, request, response):
         self._current_gripper_action = 3
         response.success = True
-        response.message = 'Gripper action set to PRESS'
+        response.message = 'Gripper action mode set to PRESS'
         return response
 
     def _log_release_callback(self, request, response):
         self._current_gripper_action = 4
         response.success = True
-        response.message = 'Gripper action set to RELEASE'
+        response.message = 'Gripper action mode set to RELEASE'
         return response
 
     def _mark_success_callback(self, request, response):
@@ -250,15 +259,17 @@ class DataCollectorNode(Node):
     def _gripper_status_cb(self, msg: GripperStatus):
         self._latest_gripper_status = msg
 
+    def _ee_pose_cb(self, msg: Float64MultiArray):
+        if len(msg.data) == 6:
+            self._latest_ee_pose = list(msg.data)
+
     # -- Synchronized callback --
 
     def _sync_callback(
         self,
         joint_msg: JointState,
         wrist_rgb_msg: Image,
-        wrist_depth_msg: Image,
         overhead_rgb_msg: Image,
-        overhead_depth_msg: Image,
     ):
         if not self.is_recording:
             return
@@ -267,12 +278,14 @@ class DataCollectorNode(Node):
         relative_time = current_time - self.recording_start_time
 
         # Joint data
+        if not self.joint_names:
+            self.joint_names = list(joint_msg.name)
         self.timestamps.append(relative_time)
         self.joint_positions.append(list(joint_msg.position))
         self.joint_velocities.append(list(joint_msg.velocity))
         self.joint_efforts.append(list(joint_msg.effort))
 
-        # Wrist camera
+        # Wrist camera (RGB only)
         try:
             wrist_rgb = self.cv_bridge.imgmsg_to_cv2(wrist_rgb_msg, desired_encoding='rgb8')
             self.wrist_rgb_images.append(wrist_rgb)
@@ -280,14 +293,7 @@ class DataCollectorNode(Node):
             self.get_logger().error(f'Wrist RGB conversion failed: {e}')
             return
 
-        try:
-            wrist_depth = self.cv_bridge.imgmsg_to_cv2(wrist_depth_msg, desired_encoding='passthrough')
-            self.wrist_depth_images.append(wrist_depth)
-        except Exception as e:
-            self.get_logger().error(f'Wrist depth conversion failed: {e}')
-            return
-
-        # Overhead camera
+        # Overhead camera (RGB only)
         try:
             overhead_rgb = self.cv_bridge.imgmsg_to_cv2(overhead_rgb_msg, desired_encoding='rgb8')
             self.overhead_rgb_images.append(overhead_rgb)
@@ -295,15 +301,14 @@ class DataCollectorNode(Node):
             self.get_logger().error(f'Overhead RGB conversion failed: {e}')
             return
 
-        try:
-            overhead_depth = self.cv_bridge.imgmsg_to_cv2(overhead_depth_msg, desired_encoding='passthrough')
-            self.overhead_depth_images.append(overhead_depth)
-        except Exception as e:
-            self.get_logger().error(f'Overhead depth conversion failed: {e}')
-            return
-
-        # Gripper action
+        # Gripper action mode
         self.gripper_actions.append(self._current_gripper_action)
+
+        # EE pose (cached latest, Indy native format [mm, mm, mm, deg, deg, deg])
+        if self._latest_ee_pose is not None:
+            self.ee_poses.append(list(self._latest_ee_pose))
+        else:
+            self.ee_poses.append([0.0] * 6)
 
     # -- Save --
 
@@ -324,15 +329,16 @@ class DataCollectorNode(Node):
         np.savez_compressed(
             filepath,
             timestamps=np.array(self.timestamps, dtype=np.float64),
+            home_joint_deg=np.array(self.home_joint_deg, dtype=np.float32),
+            camera_setup=np.array(self.camera_setup),
+            joint_names=np.array(self.joint_names, dtype=str),
             joint_positions=np.array(self.joint_positions, dtype=np.float32),
             joint_velocities=np.array(self.joint_velocities, dtype=np.float32),
             joint_efforts=np.array(self.joint_efforts, dtype=np.float32),
+            ee_poses=np.array(self.ee_poses, dtype=np.float32),
             wrist_rgb_images=np.array(self.wrist_rgb_images, dtype=np.uint8),
-            wrist_depth_images=np.array(self.wrist_depth_images, dtype=np.uint16),
             overhead_rgb_images=np.array(self.overhead_rgb_images, dtype=np.uint8),
-            overhead_depth_images=np.array(self.overhead_depth_images, dtype=np.uint16),
             gripper_actions=np.array(self.gripper_actions, dtype=np.int8),
-            success=np.array(self._episode_success if self._episode_success is not None else False),
         )
 
         size_mb = os.path.getsize(filepath) / (1024 * 1024)

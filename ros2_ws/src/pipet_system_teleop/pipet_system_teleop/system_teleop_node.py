@@ -18,7 +18,6 @@ import time
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import TwistStamped
 from std_msgs.msg import Bool
 from std_srvs.srv import Trigger
 from indy_interfaces.srv import IndyService
@@ -26,15 +25,14 @@ from indy_interfaces.srv import IndyService
 # Indy7 command codes (from indy_define.py)
 MSG_RECOVER = 1
 MSG_MOVE_HOME = 2
-MSG_TELE_JOINT_ABS = 6
-MSG_TELE_STOP = 8
 MSG_DIRECT_TEACHING_ON = 9
 MSG_DIRECT_TEACHING_OFF = 10
 MSG_MOVE_SAFE = 11
 
-ROS_QUEUE_SIZE = 10
-BASE_FRAME_ID = 'link0'
-EEF_FRAME_ID = 'tcp'
+DEFAULT_INDY_IP = '192.168.1.10'
+HOME_JOINT_DEG = [0.00, 25.00, -115.000, 90.0, 0.00, 0.000]
+HOME_VEL_RATIO = 20
+HOME_ACC_RATIO = 100
 
 
 class KeyboardReader:
@@ -52,21 +50,6 @@ class KeyboardReader:
         rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
         if rlist:
             key = sys.stdin.read(1)
-            if key == '\x1b':
-                # Arrow keys are ESC sequences: ESC [ A/B/C/D.
-                seq = key
-                for _ in range(2):
-                    rlist, _, _ = select.select([sys.stdin], [], [], 0.01)
-                    if not rlist:
-                        break
-                    seq += sys.stdin.read(1)
-                arrow_map = {
-                    '\x1b[A': 'UP',
-                    '\x1b[B': 'DOWN',
-                    '\x1b[C': 'RIGHT',
-                    '\x1b[D': 'LEFT',
-                }
-                key = arrow_map.get(seq, key)
         else:
             key = ''
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.settings)
@@ -97,14 +80,13 @@ class SystemTeleopNode(Node):
     def __init__(self):
         super().__init__('system_teleop_node')
 
+        self.declare_parameter('indy_ip', DEFAULT_INDY_IP)
+        self.indy_ip = (
+            self.get_parameter('indy_ip').get_parameter_value().string_value
+        )
+
         # Service clients -- Indy7
         self.indy_srv = self.create_client(IndyService, 'indy_srv')
-        self.servo_start = self.create_client(Trigger, '/servo_node/start_servo')
-
-        # Publishers -- MoveIt Servo Cartesian jog
-        self.twist_pub = self.create_publisher(
-            TwistStamped, '/servo_node/delta_twist_cmds', ROS_QUEUE_SIZE
-        )
 
         # Service clients -- Mark7 gripper
         self.gripper_grasp = self.create_client(Trigger, '/gripper/grasp')
@@ -118,6 +100,7 @@ class SystemTeleopNode(Node):
         self.data_mark_success = self.create_client(Trigger, '/data_collector/mark_success')
         self.data_mark_fail = self.create_client(Trigger, '/data_collector/mark_fail')
         self.data_discard = self.create_client(Trigger, '/data_collector/discard')
+
 
         # Service clients -- Data collector gripper action logging
         self.log_grasp = self.create_client(Trigger, '/data_collector/log_grasp')
@@ -134,10 +117,7 @@ class SystemTeleopNode(Node):
 
         # State
         self._teaching_enabled = False
-        self._cartesian_teleop_active = False
-        self._servo_started = False
-        self._cartesian_frame = BASE_FRAME_ID
-        self._cartesian_linear_vel = 0.05
+        self._current_mode = 'hand'  # 'hand' | 'keyboard'
         self.is_running = True
 
         # Keyboard
@@ -174,19 +154,18 @@ class SystemTeleopNode(Node):
 
     def _print_instructions(self):
         print('\n' + '=' * 60)
-        print('  PIPET SYSTEM TELEOP - Indy7 + Mark7')
+        print('  PIPET SYSTEM TELEOP - Indy7 + Mark7 (movetelel)')
         print('=' * 60)
+        print('\n  Mode (toggle):')
+        print('    [1]  Direct teaching (hand-guided)')
+        print('    [2]  Keyboard servo  (run keyboard_servo_node in another terminal)')
         print('\n  Recording:')
         print('    [SPACE]  Start/Stop recording')
         print('\n  Indy7:')
-        print('    [H]  Home position')
+        print(f'    [H]  Home position {HOME_JOINT_DEG} deg')
         print('    [D]  Direct teaching ON')
         print('    [d]  Direct teaching OFF')
         print('    [E]  Error recovery + resume teaching')
-        print('    [Arrow]  Cartesian X/Y jog via MoveIt Servo')
-        print('    [;] / [.]  Cartesian Z up/down')
-        print('    [B] / [T]  Cartesian frame: base(link0) / TCP')
-        print('    [9] / [0]  Cartesian speed down/up')
         print('\n  Mark7 Gripper:')
         print('    [G]  Grasp (pipette)')
         print('    [O]  Open (release)')
@@ -196,10 +175,9 @@ class SystemTeleopNode(Node):
         print('    [S]  Show status')
         print('    [Q]  Quit')
         print('\n  Status:')
-        print(f'    Teaching: {"ON" if self._teaching_enabled else "OFF"}')
+        print(f'    Mode:      {self._current_mode}')
+        print(f'    Teaching:  {"ON" if self._teaching_enabled else "OFF"}')
         print(f'    Recording: {"YES" if self._is_recording else "NO"}')
-        print(f'    Cartesian frame: {self._cartesian_frame}')
-        print(f'    Cartesian speed: {self._cartesian_linear_vel:.2f} m/s')
         print('=' * 60 + '\n')
 
     # -- Indy7 service calls --
@@ -234,88 +212,6 @@ class SystemTeleopNode(Node):
         self.get_logger().error(f'{client.srv_name}: timeout')
         return False
 
-    def _ensure_cartesian_servo(self) -> bool:
-        """Start MoveIt Servo and Indy teleop mode before Cartesian jog commands."""
-        if not self.servo_start.wait_for_service(timeout_sec=0.2):
-            self.get_logger().warn(
-                'MoveIt Servo service not ready: /servo_node/start_servo. '
-                'Launch indy_moveit with servo_mode:=true.'
-            )
-            return False
-
-        if not self._servo_started:
-            if not self._call_trigger(self.servo_start):
-                return False
-            self._servo_started = True
-            self.get_logger().info('MoveIt Servo started')
-
-        if not self._cartesian_teleop_active:
-            self.get_logger().info('Activating Indy teleop mode for Cartesian jog')
-            if not self._call_indy(MSG_TELE_JOINT_ABS):
-                return False
-            self._cartesian_teleop_active = True
-            self._teaching_enabled = False
-
-        return True
-
-    def _publish_cartesian_twist(
-        self,
-        *,
-        x: float = 0.0,
-        y: float = 0.0,
-        z: float = 0.0,
-        angular_x: float = 0.0,
-        angular_y: float = 0.0,
-        angular_z: float = 0.0,
-    ) -> None:
-        msg = TwistStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = self._cartesian_frame
-        msg.twist.linear.x = x
-        msg.twist.linear.y = y
-        msg.twist.linear.z = z
-        msg.twist.angular.x = angular_x
-        msg.twist.angular.y = angular_y
-        msg.twist.angular.z = angular_z
-        self.twist_pub.publish(msg)
-
-    def _handle_cartesian_jog(self, key: str) -> None:
-        if not self._ensure_cartesian_servo():
-            return
-
-        v = self._cartesian_linear_vel
-        if key == 'UP':
-            self._publish_cartesian_twist(x=v)
-            print(f'Cartesian jog: +X ({self._cartesian_frame})')
-        elif key == 'DOWN':
-            self._publish_cartesian_twist(x=-v)
-            print(f'Cartesian jog: -X ({self._cartesian_frame})')
-        elif key == 'LEFT':
-            self._publish_cartesian_twist(y=v)
-            print(f'Cartesian jog: +Y ({self._cartesian_frame})')
-        elif key == 'RIGHT':
-            self._publish_cartesian_twist(y=-v)
-            print(f'Cartesian jog: -Y ({self._cartesian_frame})')
-        elif key == ';':
-            self._publish_cartesian_twist(z=v)
-            print(f'Cartesian jog: +Z ({self._cartesian_frame})')
-        elif key == '.':
-            self._publish_cartesian_twist(z=-v)
-            print(f'Cartesian jog: -Z ({self._cartesian_frame})')
-
-    def _handle_cartesian_speed(self, faster: bool) -> None:
-        if faster:
-            self._cartesian_linear_vel = min(self._cartesian_linear_vel + 0.01, 0.20)
-        else:
-            self._cartesian_linear_vel = max(self._cartesian_linear_vel - 0.01, 0.01)
-        print(f'Cartesian speed: {self._cartesian_linear_vel:.2f} m/s')
-
-    def _stop_cartesian_teleop(self) -> None:
-        if self._cartesian_teleop_active:
-            self._publish_cartesian_twist()
-            self._call_indy(MSG_TELE_STOP)
-            self._cartesian_teleop_active = False
-
     # -- Key handlers --
 
     def _handle_space(self):
@@ -341,11 +237,26 @@ class SystemTeleopNode(Node):
                 print('Saving data (this may take a moment)...')
                 req = Trigger.Request()
                 future = self.data_stop.call_async(req)
-                rclpy.spin_until_future_complete(self, future, timeout_sec=120.0)
-                if future.result() is not None and future.result().success:
-                    print(f'{future.result().message}\n')
+                rclpy.spin_until_future_complete(self, future, timeout_sec=300.0)
+                if future.done():
+                    res = future.result()
+                    if res is not None and res.success:
+                        print(f'{res.message}\n')
+                    else:
+                        msg = res.message if res is not None else 'no response'
+                        print(f'Stop returned failure: {msg}\n')
                 else:
-                    print('Failed to stop recording.\n')
+                    # Future not yet done — save likely still in progress on backend.
+                    # Poll a bit longer before giving up so we don't wrongly report failure.
+                    print('Stop response not yet received, polling...')
+                    extra = 60.0
+                    rclpy.spin_until_future_complete(self, future, timeout_sec=extra)
+                    if future.done() and future.result() is not None and future.result().success:
+                        print(f'{future.result().message}\n')
+                    else:
+                        print(
+                            'Stop response timed out. Check episodes/ to verify the file was saved.\n'
+                        )
         else:
             print('\nStarting recording...')
             if self._call_trigger(self.data_start):
@@ -357,15 +268,25 @@ class SystemTeleopNode(Node):
         if self._is_recording:
             self.get_logger().warn('Cannot move to home while recording')
             return
-        self._stop_cartesian_teleop()
-        print('\nMoving to home position...')
-        if self._call_indy(MSG_MOVE_HOME, timeout=15.0):
+        print(f'\nMoving to home position: {HOME_JOINT_DEG} deg')
+        if self._teaching_enabled:
+            self._call_indy(MSG_DIRECT_TEACHING_OFF)
+            self._teaching_enabled = False
+        try:
+            from neuromeka import IndyDCP3
+            indy = IndyDCP3(robot_ip=self.indy_ip, index=0)
+            indy.movej(
+                jtarget=HOME_JOINT_DEG,
+                vel_ratio=HOME_VEL_RATIO,
+                acc_ratio=HOME_ACC_RATIO,
+            )
+            indy.wait_for_motion_state('is_target_reached')
             print('Home position reached.\n')
-        else:
+        except Exception as exc:
+            self.get_logger().error(f'Failed to move to home: {exc}')
             print('Failed to move to home.\n')
 
     def _handle_teaching_on(self):
-        self._stop_cartesian_teleop()
         print('\nEnabling direct teaching mode...')
         if self._call_indy(MSG_DIRECT_TEACHING_ON):
             self._teaching_enabled = True
@@ -374,7 +295,6 @@ class SystemTeleopNode(Node):
             print('Failed to enable teaching mode.\n')
 
     def _handle_teaching_off(self):
-        self._stop_cartesian_teleop()
         print('\nDisabling direct teaching mode...')
         if self._call_indy(MSG_DIRECT_TEACHING_OFF):
             self._teaching_enabled = False
@@ -407,8 +327,6 @@ class SystemTeleopNode(Node):
             print('\nStopping recording before recovery...')
             self._call_trigger(self.data_stop)
 
-        self._stop_cartesian_teleop()
-
         print('\n' + '-' * 60)
         print('  ERROR RECOVERY')
         print('-' * 60)
@@ -432,26 +350,48 @@ class SystemTeleopNode(Node):
             print('  Failed to re-enable teaching mode.\n')
         print('-' * 60 + '\n')
 
+    def _set_mode(self, mode: str):
+        """Switch input mode. 'hand' enables direct teaching; 'keyboard' disables it."""
+        if self._is_recording:
+            self.get_logger().warn('Cannot switch mode while recording')
+            return
+        if mode == self._current_mode:
+            print(f'Already in {mode} mode.\n')
+            return
+        print(f'\nSwitching mode: {self._current_mode} -> {mode}')
+        if mode == 'hand':
+            if not self._teaching_enabled:
+                if self._call_indy(MSG_DIRECT_TEACHING_ON):
+                    self._teaching_enabled = True
+                    print('Direct teaching ON. Move robot by hand.\n')
+                else:
+                    print('Failed to enable direct teaching.\n')
+                    return
+        else:
+            if self._teaching_enabled:
+                if self._call_indy(MSG_DIRECT_TEACHING_OFF):
+                    self._teaching_enabled = False
+                else:
+                    print('Failed to disable direct teaching.\n')
+                    return
+            print(f'{mode} mode active. Use keyboard_servo_node to move the robot.\n')
+        self._current_mode = mode
+
     def _handle_status(self):
         print('\n' + '-' * 40)
-        print(f'  Teaching: {"ON" if self._teaching_enabled else "OFF"}')
+        print(f'  Mode:      {self._current_mode}')
+        print(f'  Teaching:  {"ON" if self._teaching_enabled else "OFF"}')
         print(f'  Recording: {"YES" if self._is_recording else "NO"}')
         mark7 = 'connected' if self.gripper_grasp.service_is_ready() else 'not available'
         data = 'connected' if self.data_start.service_is_ready() else 'not available'
-        servo = 'connected' if self.servo_start.service_is_ready() else 'not available'
         print(f'  Mark7: {mark7}')
         print(f'  Data Collector: {data}')
-        print(f'  MoveIt Servo: {servo}')
-        print(f'  Cartesian teleop: {"ON" if self._cartesian_teleop_active else "OFF"}')
-        print(f'  Cartesian frame: {self._cartesian_frame}')
-        print(f'  Cartesian speed: {self._cartesian_linear_vel:.2f} m/s')
         print('-' * 40 + '\n')
 
     def _handle_quit(self):
         print('\nShutting down...')
         if self._is_recording:
             self._call_trigger(self.data_stop)
-        self._stop_cartesian_teleop()
         if self._teaching_enabled:
             self._call_indy(MSG_DIRECT_TEACHING_OFF)
         self.is_running = False
@@ -470,18 +410,10 @@ class SystemTeleopNode(Node):
 
                 if key == ' ':
                     self._handle_space()
-                elif key in ('UP', 'DOWN', 'LEFT', 'RIGHT', ';', '.'):
-                    self._handle_cartesian_jog(key)
-                elif key_upper == 'B':
-                    self._cartesian_frame = BASE_FRAME_ID
-                    print(f'Cartesian frame: {self._cartesian_frame}')
-                elif key_upper == 'T':
-                    self._cartesian_frame = EEF_FRAME_ID
-                    print(f'Cartesian frame: {self._cartesian_frame}')
-                elif key == '0':
-                    self._handle_cartesian_speed(faster=True)
-                elif key == '9':
-                    self._handle_cartesian_speed(faster=False)
+                elif key == '1':
+                    self._set_mode('hand')
+                elif key == '2':
+                    self._set_mode('keyboard')
                 elif key_upper == 'H':
                     self._handle_home()
                 elif key_upper == 'D' and key == 'D':
@@ -512,7 +444,6 @@ class SystemTeleopNode(Node):
     def destroy_node(self):
         if self._is_recording:
             self._call_trigger(self.data_stop)
-        self._stop_cartesian_teleop()
         if self._teaching_enabled:
             self._call_indy(MSG_DIRECT_TEACHING_OFF)
         super().destroy_node()

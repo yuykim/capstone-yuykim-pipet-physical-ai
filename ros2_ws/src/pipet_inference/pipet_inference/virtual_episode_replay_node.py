@@ -99,7 +99,7 @@ class VirtualEpisodeReplayNode(Node):
             self._overhead_rgb_images = ep["overhead_rgb_images"]
             self._overhead_depth_images = ep["overhead_depth_images"]
             self._gripper_actions = ep["gripper_actions"]
-            self._success = bool(_get_success(ep, success_key))
+            self._success = bool(_get_success(ep, success_key, self._episode_npz_path))
 
         self._replay_fps = int(replay_fps) if int(replay_fps) > 0 else _derive_replay_fps_from_timestamps(self._timestamps)
         self._period_s = 1.0 / max(1.0, self._replay_fps)
@@ -183,7 +183,7 @@ class VirtualEpisodeReplayNode(Node):
         self._gripper_status_pub.publish(msg)
 
     def _log_gripper_action_if_needed(self, cmd: int) -> None:
-        # DataCollectorNode는 gripper_actions를 아래 서비스 호출로 기록한다.
+        # DataCollectorNode records gripper_actions as a mode value.
         # hold(0)에 해당하는 서비스는 없으므로, cmd==0이면 아무것도 호출하지 않는다.
         if cmd == 0:
             return
@@ -221,8 +221,7 @@ class VirtualEpisodeReplayNode(Node):
         stamp = self.get_clock().now().to_msg()
 
         # 1) gripper action log를 먼저 갱신한다.
-        #    (collector는 sync callback에서 "현재 gripper action 상태값"을 그대로 frame에 저장하므로
-        #     센서 토픽을 퍼블리시하기 전에 action 상태를 맞춰주는 게 직관적이다.)
+        #    collector는 sync callback에서 "현재 gripper action mode"를 frame에 저장한다.
         desired_cmd = int(self._gripper_actions[self._idx])
         self._log_gripper_action_if_needed(desired_cmd)
 
@@ -266,7 +265,15 @@ class VirtualEpisodeReplayNode(Node):
         self._idx += 1
 
 
-def _get_success(npz: np.lib.npyio.NpzFile, success_key: str) -> bool:
+def _get_success(npz: np.lib.npyio.NpzFile, success_key: str, episode_path: Path) -> bool:
+    if episode_path.parent.name == "success" or episode_path.stem.endswith("_success"):
+        return True
+    if episode_path.parent.name in {"fail", "unlabeled"}:
+        return False
+    if episode_path.stem.endswith("_fail") or episode_path.stem.endswith("_unlabeled"):
+        return False
+
+    # Backward compatibility for older NPZ files that stored the label internally.
     if success_key in npz:
         return npz[success_key].item() if hasattr(npz[success_key], "item") else npz[success_key]
     if "success" in npz:
@@ -291,4 +298,3 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
-

@@ -4,21 +4,24 @@
 
 입력 NPZ 키(현재 `pipet_data_collector/data_collector_node.py`가 저장하는 구조):
   - timestamps: (N,)
+  - home_joint_deg: (6,) metadata only; ignored during LeRobot conversion
+  - camera_setup: () metadata only; ignored during LeRobot conversion
+  - joint_names: (6,)
   - joint_positions: (N, 6)
   - joint_velocities: (N, 6)
   - joint_efforts: (N, 6)
+  - ee_poses: (N, 6) Indy native [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]
   - wrist_rgb_images: (N, H, W, 3) uint8
-  - wrist_depth_images: (N, H, W) uint16  (baseline 변환에서는 미사용)
+  - wrist_depth_images: (N, H, W) uint16  (optional legacy/depth profile)
   - overhead_rgb_images: (N, H, W, 3) uint8
-  - overhead_depth_images: (N, H, W) uint16 (baseline 변환에서는 미사용)
-  - gripper_actions: (N,) int8 (0=유지, 1=잡기, 2=펴기, 3=누르기, 4=엄지 펴기)
-  - success: () bool (옵션) 또는 episode_success
+  - overhead_depth_images: (N, H, W) uint16 (optional legacy/depth profile)
+  - gripper_actions: (N,) int8 모드 (0=유지, 1=잡기, 2=펴기, 3=누르기, 4=엄지 펴기)
 
 출력 LeRobotDataset( ACT baseline 기준 ) feature 매핑:
   - observation.images.front     : wrist_rgb_images[t]
   - observation.images.overhead  : overhead_rgb_images[t]
   - observation.state            : [q, dq, tau] concat (18차원)
-  - action                       : [delta_q, gripper_action] concat (7차원)
+  - action                       : action_space에 따라 [delta_q 또는 delta_ee_pose, gripper_action] concat (7차원)
 
 설계/주의사항:
   - 원본 `timestamps[t]`를 프레임에 **일부러 저장하지 않는다.**
@@ -26,7 +29,7 @@
     실제 로봇 로그는 jitter가 있기 쉬우므로, timestamp를 생략하고 LeRobot이
     frame_index/fps 기반으로 단조 증가 timestamp를 생성하게 둔다.
   - `delta_q[t] = q[t+1] - q[t]` 이므로 마지막 프레임은 학습 샘플에서 제외한다.
-  - Depth는 현재 baseline에서는 입력으로 쓰지 않지만, NPZ에 남겨두고 추후 확장에 활용한다.
+  - Depth는 현재 수집하지 않는다. 예전 NPZ/depth 실험은 --include_depth로만 사용한다.
 
 extended 프로파일:
   - NPZ에 ``ee_pose``가 없으면 ``--fk_urdf`` + Pinocchio로 TCP FK를 계산해 7D를 채운다.
@@ -53,6 +56,31 @@ def _get_scalar_bool(np_value: Any) -> bool:
     if isinstance(np_value, np.ndarray) and np_value.size == 1:
         return bool(np_value.reshape(-1)[0].item())
     return bool(np_value)
+
+
+def _infer_label_from_path(ep_path: Path) -> str | None:
+    if ep_path.parent.name in {"success", "fail", "unlabeled"}:
+        return ep_path.parent.name
+    stem = ep_path.stem
+    for label in ("success", "fail", "unlabeled"):
+        if stem.endswith(f"_{label}"):
+            return label
+    return None
+
+
+def _is_success_episode(ep_path: Path, ep: np.lib.npyio.NpzFile, success_key: str) -> bool | None:
+    label = _infer_label_from_path(ep_path)
+    if label is not None:
+        return label == "success"
+
+    # Backward compatibility for older NPZ files that stored the label internally.
+    if success_key in ep:
+        return _get_scalar_bool(ep[success_key])
+    if "episode_success" in ep:
+        return _get_scalar_bool(ep["episode_success"])
+    if "success" in ep:
+        return _get_scalar_bool(ep["success"])
+    return None
 
 
 def _derive_fps_from_timestamps(timestamps: np.ndarray) -> int:
@@ -150,9 +178,10 @@ def _build_features_ext(
     h: int,
     w: int,
     *,
-    include_ee_pose: bool,
+    ee_pose_cols: int,
     include_gripper_state: bool,
     include_depth: bool,
+    action_space: str,
 ) -> dict[str, dict[str, Any]]:
     image_shape = (h, w, 3)  # HWC
     state_names = (
@@ -160,11 +189,18 @@ def _build_features_ext(
         + [f"joint_velocities_{i}" for i in range(6)]
         + [f"joint_efforts_{i}" for i in range(6)]
     )
-    if include_ee_pose:
-        state_names += [f"ee_pose_{i}" for i in range(7)]
+    if ee_pose_cols == 6:
+        state_names += [f"ee_pose_{label}" for label in ["x", "y", "z", "rx", "ry", "rz"]]
+    elif ee_pose_cols > 0:
+        state_names += [f"ee_pose_{i}" for i in range(ee_pose_cols)]
     if include_gripper_state:
         state_names += ["gripper_state"]
-    action_names = [f"delta_q_{i}" for i in range(6)] + ["gripper_action"]
+    if action_space == "cartesian":
+        action_names = [f"delta_ee_{label}" for label in ["x", "y", "z", "rx", "ry", "rz"]] + [
+            "gripper_action"
+        ]
+    else:
+        action_names = [f"delta_q_{i}" for i in range(6)] + ["gripper_action"]
 
     out: dict[str, dict[str, Any]] = {
         "observation.images.front": {
@@ -316,11 +352,11 @@ def main() -> None:
     parser.add_argument("--output_repo_id", default="pipet_dataset", help="repo_id stored in meta/info.json")
     parser.add_argument("--fps", type=int, default=0, help="Dataset fps. If 0, derive from the first episode timestamps.")
     parser.add_argument("--task", default="Pick up the pipette", help="Task string stored per frame.")
-    parser.add_argument("--only_success", action="store_true", help="Skip episodes where success==False.")
+    parser.add_argument("--only_success", action="store_true", help="Use only episodes under success/ or named *_success.npz.")
     parser.add_argument(
         "--success_key",
         default="success",
-        help="NPZ key for episode label (default: success; alternatives: episode_success).",
+        help="Legacy NPZ key for episode label if no success/fail/unlabeled path label is present.",
     )
     parser.add_argument("--max_episodes", type=int, default=0, help="0 means no limit.")
     parser.add_argument("--image_resize_to", type=str, default="", help="Optional HxW resize, e.g. 480x640.")
@@ -351,6 +387,12 @@ def main() -> None:
         default="baseline",
         help="baseline: q/dq/tau(18D). extended: +ee_pose(7)+gripper_state(1)=26D; "
         "ee_pose는 NPZ 키 또는 --fk_urdf FK; gripper_state 없으면 gripper_actions[t].",
+    )
+    parser.add_argument(
+        "--action_space",
+        choices=["joint", "cartesian"],
+        default="joint",
+        help="joint=delta_q action | cartesian=delta_ee_pose action from ee_poses.",
     )
     parser.add_argument(
         "--include_depth",
@@ -384,7 +426,7 @@ def main() -> None:
     if not episodes_dir.exists():
         raise FileNotFoundError(f"episodes_dir not found: {episodes_dir}")
 
-    episode_files = sorted(glob.glob(str(episodes_dir / "episode_*.npz")))
+    episode_files = sorted(glob.glob(str(episodes_dir / "**" / "episode_*.npz"), recursive=True))
     if len(episode_files) == 0:
         raise FileNotFoundError(f"No episode_*.npz found under: {episodes_dir}")
 
@@ -438,7 +480,8 @@ def main() -> None:
         rh, rw = h, w
         cv2 = None  # type: ignore
 
-    include_ee_pose = args.state_profile == "extended"
+    include_ee_pose = args.state_profile == "extended" or args.action_space == "cartesian"
+    ee_pose_cols = 6 if args.action_space == "cartesian" else (7 if include_ee_pose else 0)
     include_gripper_state = args.state_profile == "extended"
 
     fk_solver: Optional[Any] = None
@@ -455,9 +498,10 @@ def main() -> None:
     features = _build_features_ext(
         h=h,
         w=w,
-        include_ee_pose=include_ee_pose,
+        ee_pose_cols=ee_pose_cols,
         include_gripper_state=include_gripper_state,
         include_depth=bool(args.include_depth),
+        action_space=args.action_space,
     )
 
     output_dir = Path(args.output_dir)
@@ -487,15 +531,7 @@ def main() -> None:
     total_kept_frames = 0
     for i, ep_path in enumerate(episode_files):
         with np.load(ep_path) as ep:
-            # success 라벨 키가 파이프라인에 따라 다를 수 있어 유연하게 처리한다.
-            # (collector 변경 시 변환 스크립트를 다시 쓰지 않도록)
-            success_val = None
-            if args.success_key in ep:
-                success_val = _get_scalar_bool(ep[args.success_key])
-            elif "episode_success" in ep:
-                success_val = _get_scalar_bool(ep["episode_success"])
-            elif "success" in ep:
-                success_val = _get_scalar_bool(ep["success"])
+            success_val = _is_success_episode(Path(ep_path), ep, args.success_key)
 
             if args.only_success and success_val is not None and not success_val:
                 continue
@@ -517,15 +553,20 @@ def main() -> None:
                 continue
 
             if include_ee_pose:
-                if "ee_pose" in ep:
-                    ee_pose_mat = _ensure_matrix(ep["ee_pose"], 7, "ee_pose")
+                if "ee_poses" in ep:
+                    ee_pose_mat = _ensure_matrix(ep["ee_poses"], ee_pose_cols, "ee_poses")
+                elif "ee_pose" in ep:
+                    ee_pose_mat = _ensure_matrix(ep["ee_pose"], ee_pose_cols, "ee_pose")
                 else:
                     if fk_solver is None:
                         raise ValueError(
-                            "state_profile=extended but NPZ has no 'ee_pose'. Either record ee_pose in NPZ or pass "
+                            "state_profile=extended or action_space=cartesian but NPZ has no 'ee_poses'/'ee_pose'. "
+                            "Either record ee_poses in NPZ or pass "
                             "--fk_urdf PATH_TO_INDY7.urdf (Pinocchio required) to compute TCP pose from joint_positions."
                         )
-                    ee_pose_mat = np.zeros((n, 7), dtype=np.float32)
+                    if ee_pose_cols != 7:
+                        raise ValueError("FK fallback provides 7D ee_pose and cannot fill 6D Indy-native ee_poses.")
+                    ee_pose_mat = np.zeros((n, ee_pose_cols), dtype=np.float32)
                     for ti in range(n):
                         ee_pose_mat[ti] = fk_solver.compute(joint_positions[ti])
             else:
@@ -558,7 +599,11 @@ def main() -> None:
             dq_t = joint_velocities[t]
             tau_t = joint_efforts[t]
 
-            delta_q = joint_positions[t + 1] - joint_positions[t]  # (6,)
+            if args.action_space == "cartesian":
+                assert ee_pose_mat is not None
+                delta_action = ee_pose_mat[t + 1, :6] - ee_pose_mat[t, :6]
+            else:
+                delta_action = joint_positions[t + 1] - joint_positions[t]  # (6,)
             gripper_cmd = float(gripper_actions[t])
 
             state_vec = np.concatenate([q_t, dq_t, tau_t], axis=0).astype(np.float32)
@@ -575,7 +620,7 @@ def main() -> None:
                     else float(gripper_actions[t])
                 )
                 state_vec = np.concatenate([state_vec, np.array([gs], dtype=np.float32)], axis=0).astype(np.float32)
-            action_vec = np.concatenate([delta_q, np.array([gripper_cmd], dtype=np.float32)], axis=0).astype(
+            action_vec = np.concatenate([delta_action, np.array([gripper_cmd], dtype=np.float32)], axis=0).astype(
                 np.float32
             )
 
