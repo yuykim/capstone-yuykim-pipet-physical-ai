@@ -42,11 +42,19 @@ class DataCollectorNode(Node):
         # Parameters
         self.declare_parameter('output_dir', 'episodes')
         self.declare_parameter('sync_slop', 1.0)
+        self.declare_parameter('home_joint_deg', [0.00, 25.00, -115.000, 90.0, 0.00, 0.000])
+        self.declare_parameter('camera_setup', 'wrist+overhead_rgb')
 
         self.output_dir = os.path.expanduser(
             self.get_parameter('output_dir').get_parameter_value().string_value
         )
         sync_slop = self.get_parameter('sync_slop').get_parameter_value().double_value
+        self.home_joint_deg = list(
+            self.get_parameter('home_joint_deg').get_parameter_value().double_array_value
+        )
+        self.camera_setup = (
+            self.get_parameter('camera_setup').get_parameter_value().string_value
+        )
 
         os.makedirs(self.output_dir, exist_ok=True)
         self.get_logger().info(f'Output directory: {self.output_dir}')
@@ -62,8 +70,8 @@ class DataCollectorNode(Node):
         # Data buffers
         self._clear_buffers()
 
-        # Gripper action tracking
-        # 0=hold, 1=grasp, 2=open, 3=press, 4=release
+        # Gripper action mode.
+        # 0=hold, 1=grasp, 2=open, 3=press, 4=release.
         self._current_gripper_action: int = 0
 
         # Episode result (True=success, False=fail, None=unmarked)
@@ -147,6 +155,7 @@ class DataCollectorNode(Node):
     def _clear_buffers(self):
         """Clear all data buffers."""
         self.timestamps: List[float] = []
+        self.joint_names: List[str] = []
         self.joint_positions: List[List[float]] = []
         self.joint_velocities: List[List[float]] = []
         self.joint_efforts: List[List[float]] = []
@@ -206,25 +215,25 @@ class DataCollectorNode(Node):
     def _log_grasp_callback(self, request, response):
         self._current_gripper_action = 1
         response.success = True
-        response.message = 'Gripper action set to GRASP'
+        response.message = 'Gripper action mode set to GRASP'
         return response
 
     def _log_open_callback(self, request, response):
         self._current_gripper_action = 2
         response.success = True
-        response.message = 'Gripper action set to OPEN'
+        response.message = 'Gripper action mode set to OPEN'
         return response
 
     def _log_press_callback(self, request, response):
         self._current_gripper_action = 3
         response.success = True
-        response.message = 'Gripper action set to PRESS'
+        response.message = 'Gripper action mode set to PRESS'
         return response
 
     def _log_release_callback(self, request, response):
         self._current_gripper_action = 4
         response.success = True
-        response.message = 'Gripper action set to RELEASE'
+        response.message = 'Gripper action mode set to RELEASE'
         return response
 
     def _mark_success_callback(self, request, response):
@@ -269,6 +278,8 @@ class DataCollectorNode(Node):
         relative_time = current_time - self.recording_start_time
 
         # Joint data
+        if not self.joint_names:
+            self.joint_names = list(joint_msg.name)
         self.timestamps.append(relative_time)
         self.joint_positions.append(list(joint_msg.position))
         self.joint_velocities.append(list(joint_msg.velocity))
@@ -290,7 +301,7 @@ class DataCollectorNode(Node):
             self.get_logger().error(f'Overhead RGB conversion failed: {e}')
             return
 
-        # Gripper action
+        # Gripper action mode
         self.gripper_actions.append(self._current_gripper_action)
 
         # EE pose (cached latest, Indy native format [mm, mm, mm, deg, deg, deg])
@@ -318,6 +329,9 @@ class DataCollectorNode(Node):
         np.savez_compressed(
             filepath,
             timestamps=np.array(self.timestamps, dtype=np.float64),
+            home_joint_deg=np.array(self.home_joint_deg, dtype=np.float32),
+            camera_setup=np.array(self.camera_setup),
+            joint_names=np.array(self.joint_names, dtype=str),
             joint_positions=np.array(self.joint_positions, dtype=np.float32),
             joint_velocities=np.array(self.joint_velocities, dtype=np.float32),
             joint_efforts=np.array(self.joint_efforts, dtype=np.float32),
@@ -325,7 +339,6 @@ class DataCollectorNode(Node):
             wrist_rgb_images=np.array(self.wrist_rgb_images, dtype=np.uint8),
             overhead_rgb_images=np.array(self.overhead_rgb_images, dtype=np.uint8),
             gripper_actions=np.array(self.gripper_actions, dtype=np.int8),
-            success=np.array(self._episode_success if self._episode_success is not None else False),
         )
 
         size_mb = os.path.getsize(filepath) / (1024 * 1024)

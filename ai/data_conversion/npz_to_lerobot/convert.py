@@ -4,21 +4,23 @@
 
 입력 NPZ 키(현재 `pipet_data_collector/data_collector_node.py`가 저장하는 구조):
   - timestamps: (N,)
+  - home_joint_deg: (6,) metadata only; ignored during LeRobot conversion
+  - camera_setup: () metadata only; ignored during LeRobot conversion
+  - joint_names: (6,)
   - joint_positions: (N, 6)
   - joint_velocities: (N, 6)
   - joint_efforts: (N, 6)
   - ee_poses: (N, 6) Indy native [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]
   - wrist_rgb_images: (N, H, W, 3) uint8
   - overhead_rgb_images: (N, H, W, 3) uint8
-  - gripper_actions: (N,) int8 (0=유지, 1=잡기, 2=펴기, 3=누르기, 4=엄지 펴기)
-  - success: () bool (옵션) 또는 episode_success
+  - gripper_actions: (N,) int8 모드 (0=유지, 1=잡기, 2=펴기, 3=누르기, 4=엄지 펴기)
 
 출력 LeRobotDataset feature 매핑 (--camera, --action_space로 조절):
   - observation.image            : (선택된 카메라) wrist 또는 overhead RGB
   - observation.state            : [q, dq, tau, ee_pose] concat (24차원)
   - action                       : action_space에 따라
-      cartesian: [delta_ee_pose(6), gripper(1)] = 7차원 (movetelel 학습용)
-      joint:     [delta_q(6), gripper(1)] = 7차원 (movetelej 학습용)
+      cartesian: [delta_ee_pose(6), gripper_action(1)] = 7차원 (movetelel 학습용)
+      joint:     [delta_q(6), gripper_action(1)] = 7차원 (movetelej 학습용)
 
 설계/주의사항:
   - 원본 `timestamps[t]`를 프레임에 **일부러 저장하지 않는다.**
@@ -26,7 +28,7 @@
     실제 로봇 로그는 jitter가 있기 쉬우므로, timestamp를 생략하고 LeRobot이
     frame_index/fps 기반으로 단조 증가 timestamp를 생성하게 둔다.
   - `delta_q[t] = q[t+1] - q[t]` 이므로 마지막 프레임은 학습 샘플에서 제외한다.
-  - Depth는 현재 baseline에서는 입력으로 쓰지 않지만, NPZ에 남겨두고 추후 확장에 활용한다.
+  - Depth는 현재 수집하지 않는다.
 """
 
 from __future__ import annotations
@@ -49,6 +51,31 @@ def _get_scalar_bool(np_value: Any) -> bool:
     if isinstance(np_value, np.ndarray) and np_value.size == 1:
         return bool(np_value.reshape(-1)[0].item())
     return bool(np_value)
+
+
+def _infer_label_from_path(ep_path: Path) -> str | None:
+    if ep_path.parent.name in {"success", "fail", "unlabeled"}:
+        return ep_path.parent.name
+    stem = ep_path.stem
+    for label in ("success", "fail", "unlabeled"):
+        if stem.endswith(f"_{label}"):
+            return label
+    return None
+
+
+def _is_success_episode(ep_path: Path, ep: np.lib.npyio.NpzFile, success_key: str) -> bool | None:
+    label = _infer_label_from_path(ep_path)
+    if label is not None:
+        return label == "success"
+
+    # Backward compatibility for older NPZ files that stored the label internally.
+    if success_key in ep:
+        return _get_scalar_bool(ep[success_key])
+    if "episode_success" in ep:
+        return _get_scalar_bool(ep["episode_success"])
+    if "success" in ep:
+        return _get_scalar_bool(ep["success"])
+    return None
 
 
 def _derive_fps_from_timestamps(timestamps: np.ndarray) -> int:
@@ -124,11 +151,11 @@ def main() -> None:
     parser.add_argument("--output_repo_id", default="pipet_dataset", help="repo_id stored in meta/info.json")
     parser.add_argument("--fps", type=int, default=0, help="Dataset fps. If 0, derive from the first episode timestamps.")
     parser.add_argument("--task", default="Pick up the pipette", help="Task string stored per frame.")
-    parser.add_argument("--only_success", action="store_true", help="Skip episodes where success==False.")
+    parser.add_argument("--only_success", action="store_true", help="Use only episodes under success/ or named *_success.npz.")
     parser.add_argument(
         "--success_key",
         default="success",
-        help="NPZ key for episode label (default: success; alternatives: episode_success).",
+        help="Legacy NPZ key for episode label if no success/fail/unlabeled path label is present.",
     )
     parser.add_argument("--max_episodes", type=int, default=0, help="0 means no limit.")
     parser.add_argument("--image_resize_to", type=str, default="", help="Optional HxW resize, e.g. 480x640.")
@@ -150,7 +177,7 @@ def main() -> None:
     if not episodes_dir.exists():
         raise FileNotFoundError(f"episodes_dir not found: {episodes_dir}")
 
-    episode_files = sorted(glob.glob(str(episodes_dir / "episode_*.npz")))
+    episode_files = sorted(glob.glob(str(episodes_dir / "**" / "episode_*.npz"), recursive=True))
     if len(episode_files) == 0:
         raise FileNotFoundError(f"No episode_*.npz found under: {episodes_dir}")
 
@@ -249,15 +276,7 @@ def main() -> None:
     kept_episodes = 0
     for i, ep_path in enumerate(episode_files):
         with np.load(ep_path) as ep:
-            # success 라벨 키가 파이프라인에 따라 다를 수 있어 유연하게 처리한다.
-            # (collector 변경 시 변환 스크립트를 다시 쓰지 않도록)
-            success_val = None
-            if args.success_key in ep:
-                success_val = _get_scalar_bool(ep[args.success_key])
-            elif "episode_success" in ep:
-                success_val = _get_scalar_bool(ep["episode_success"])
-            elif "success" in ep:
-                success_val = _get_scalar_bool(ep["success"])
+            success_val = _is_success_episode(Path(ep_path), ep, args.success_key)
 
             if args.only_success and success_val is not None and not success_val:
                 continue
@@ -323,4 +342,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
