@@ -250,6 +250,8 @@ float32 temperature # 온도 (°C)
 | 키 | Shape | dtype | 설명 |
 |----|-------|-------|------|
 | `timestamps` | (N,) | float64 | 녹화 시작 기준 상대 시간 (초) |
+| `home_joint_deg` | (6,) | float32 | 수집 당시 홈 포지션 metadata, 학습 변환 제외 |
+| `camera_setup` | () | str | 카메라 구성 metadata, 학습 변환 제외 |
 | `joint_positions` | (N, 6) | float32 | Indy7 관절 각도 (rad) |
 | `joint_velocities` | (N, 6) | float32 | Indy7 관절 속도 (rad/s) |
 | `joint_efforts` | (N, 6) | float32 | Indy7 관절 토크 (N·m) |
@@ -257,8 +259,7 @@ float32 temperature # 온도 (°C)
 | `wrist_depth_images` | (N, 480, 640) | uint16 | 손목 카메라 Depth 이미지 (mm) |
 | `overhead_rgb_images` | (N, 480, 640, 3) | uint8 | 오버헤드 카메라 RGB 이미지 |
 | `overhead_depth_images` | (N, 480, 640) | uint16 | 오버헤드 카메라 Depth 이미지 (mm) |
-| `gripper_actions` | (N,) | int8 | 그리퍼 액션 이산값: 0=유지 / 1=잡기 / 2=펴기 / 3=파이펫 누르기 / 4=엄지 펴기(release) |
-| `success` | () | bool | 에피소드 성공 여부 |
+| `gripper_actions` | (N,) | int8 | 그리퍼 모드: 0=유지 / 1=잡기 / 2=펴기 / 3=파이펫 누르기 / 4=엄지 펴기(release) |
 
 #### 런치 파라미터
 

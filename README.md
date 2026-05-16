@@ -183,12 +183,14 @@ ros2 run pipet_system_teleop system_teleop_node
 | 키 | Shape | 설명 |
 |---|---|---|
 | `timestamps` | (N,) | 녹화 시작 기준 상대 시간 |
+| `home_joint_deg` | (6,) | 수집 당시 홈 포지션 metadata, 학습 변환 제외 |
+| `camera_setup` | () | 카메라 구성 metadata, 예: `wrist+overhead_rgb`, 학습 변환 제외 |
+| `joint_names` | (6,) | `joint_positions`의 관절 이름 순서 |
 | `joint_positions/velocities/efforts` | (N, 6) | Indy7 관절 (rad) |
 | `ee_poses` | (N, 6) | EE pose `[x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]` (movetelel용) |
 | `wrist_rgb_images` | (N, 480, 640, 3) | 손목 카메라 RGB |
 | `overhead_rgb_images` | (N, 480, 640, 3) | 오버헤드 카메라 RGB |
-| `gripper_actions` | (N,) | 0=hold 1=grasp 2=open 3=press 4=release |
-| `success` | () | True/False |
+| `gripper_actions` | (N,) | 모드: 0=hold 1=grasp 2=open 3=press 4=release |
 
 > Depth는 수집 안 함. 동기화: joint + wrist RGB + overhead RGB (3토픽). gripper/ee_pose는 캐시.
 
