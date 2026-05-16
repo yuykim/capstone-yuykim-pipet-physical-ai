@@ -101,6 +101,14 @@ ros2 run pipet_system_teleop keyboard_servo_node
 
 → Pygame 창에서 Indy7 상대 텔레옵, Mark7 그리퍼, 녹화 시작/중지/라벨링을 모두 제어.
 
+### 카메라 노드 확인
+```bash
+conda deactivate
+source /opt/ros/humble/setup.bash
+source ~/2026capstone2_ws/pipet-physical-ai/ros2_ws/install/setup.bash
+ros2 run rqt_image_view rqt_image_view /wrist_camera/camera/color/image_raw
+```
+
 ### 터미널 3 — 마스터 텔레옵 (직접 교시 사용 시만, TTY)
 
 ```bash

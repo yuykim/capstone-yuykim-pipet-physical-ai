@@ -8,7 +8,7 @@ from neuromeka import IndyDCP3, TaskTeleopType
 ROBOT_IP = "192.168.1.10" 
 STEP = 0.5        # 이동 간격 (mm 또는 degree)
 ROT_STEP = 0.5    # 회전은 이동보다 민감할 수 있어 따로 관리 가능
-HOME_JOINT_DEG = [0.0, 50.0, -130.0, 90.0, 0.0, 0.0]
+HOME_JOINT_DEG = [0.00, 25.00, -115.000, 90.0, 0.00, 0.000]
 HOME_VEL_RATIO = 20
 HOME_ACC_RATIO = 100
 
