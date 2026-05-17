@@ -36,7 +36,6 @@
 timestamp
 joint_positions
 joint_velocities
-joint_efforts
 ee_pose
 rgb_images
 depth_images
@@ -85,7 +84,6 @@ Indy7 + Mark7 제어
 * `timestamp`
 * `joint_positions`
 * `joint_velocities`
-* `joint_efforts`
 * `ee_pose`
 * `rgb_images`
 * `depth_images`
@@ -106,7 +104,6 @@ observation.state[t] =
 [
   joint_positions[t],     # 6
   joint_velocities[t],    # 6
-  joint_efforts[t],       # 6
   ee_pose[t],             # 7
   gripper_state[t]        # 1
 ]
@@ -115,13 +112,13 @@ observation.state[t] =
 총 차원은 다음과 같다.
 
 ```text
-6 + 6 + 6 + 7 + 1 = 26
+6 + 6 + 7 + 1 = 20
 ```
 
 즉,
 
 ```text
-observation.state.shape = (N, 26)
+observation.state.shape = (N, 20)
 ```
 
 #### `observation.images.front`
@@ -200,7 +197,6 @@ sample_t =
   "observation.state": [
     joint_positions[t],
     joint_velocities[t],
-    joint_efforts[t],
     ee_pose[t],
     gripper_state[t]
   ],
@@ -417,4 +413,3 @@ q_target = q_current + arm_actions_t
 * [Raw 데이터 정의 문서](./ai_architecture.md)
 
 ````
-

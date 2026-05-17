@@ -82,7 +82,6 @@ Collected NPZ episodes are expected to contain:
 - `timestamps`: `(N,)`
 - `joint_positions`: `(N, 6)`
 - `joint_velocities`: `(N, 6)`
-- `joint_efforts`: `(N, 6)`
 - `wrist_rgb_images`: `(N, H, W, 3)`
 - `wrist_depth_images`: `(N, H, W)`
 - `overhead_rgb_images`: `(N, H, W, 3)`

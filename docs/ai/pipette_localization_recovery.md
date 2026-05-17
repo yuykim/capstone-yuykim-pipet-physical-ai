@@ -54,8 +54,8 @@ python ai/diagnostics/offline_error_split.py \
 
 `convert.py`는 두 가지 상태 프로파일을 지원한다.
 
-- baseline: `q+dq+tau` (18D)
-- extended: `+ee_pose(7D)+gripper_state(1D)` (총 26D)
+- baseline: `q+dq` (12D)
+- extended: `+ee_pose(7D)+gripper_state(1D)` (총 20D)
 
 추가로 depth 입력을 별도 채널로 포함할 수 있다.
 

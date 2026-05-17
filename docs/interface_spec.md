@@ -254,7 +254,6 @@ float32 temperature # 온도 (°C)
 | `camera_setup` | () | str | 카메라 구성 metadata, 학습 변환 제외 |
 | `joint_positions` | (N, 6) | float32 | Indy7 관절 각도 (rad) |
 | `joint_velocities` | (N, 6) | float32 | Indy7 관절 속도 (rad/s) |
-| `joint_efforts` | (N, 6) | float32 | Indy7 관절 토크 (N·m) |
 | `wrist_rgb_images` | (N, 480, 640, 3) | uint8 | 손목 카메라 RGB 이미지 |
 | `wrist_depth_images` | (N, 480, 640) | uint16 | 손목 카메라 Depth 이미지 (mm) |
 | `overhead_rgb_images` | (N, 480, 640, 3) | uint8 | 오버헤드 카메라 RGB 이미지 |

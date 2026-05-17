@@ -36,7 +36,6 @@ episodes/unlabeled/episode_YYYYMMDD_HHMMSS_unlabeled.npz
 | `joint_names` | `(6,)` | `str` | `joint_positions` column 순서 |
 | `joint_positions` | `(N, 6)` | `float32` | Indy7 관절 위치, rad |
 | `joint_velocities` | `(N, 6)` | `float32` | Indy7 관절 속도 |
-| `joint_efforts` | `(N, 6)` | `float32` | Indy7 관절 effort/토크 계열 값 |
 | `ee_poses` | `(N, 6)` | `float32` | TCP pose: `[x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]` |
 | `wrist_rgb_images` | `(N, H, W, 3)` | `uint8` | 손목 카메라 RGB |
 | `overhead_rgb_images` | `(N, H, W, 3)` | `uint8` | 오버헤드 카메라 RGB |
@@ -135,14 +134,6 @@ mode 방식:
 - 저장 비용이 작고, 부드러운 trajectory 분석이나 개선 실험에 쓸 수 있다.
 - 초기 학습 입력에서는 제외해도 된다.
 
-### `joint_efforts`
-
-관절 effort/토크 계열 값이다.
-
-- 필수는 아님.
-- 접촉/부하/실패 분석에 쓸 수 있지만, 노이즈와 의미 불확실성이 있을 수 있다.
-- 저장 비용이 작으므로 유지한다.
-
 ### `joint_names`
 
 `joint_positions`의 column 순서를 기록한다.
@@ -227,6 +218,14 @@ wrist+overhead_rgb
 
 - `ee_poses` 차분으로 후처리 가능하다.
 - 직접 저장하면 노이즈와 동기화 관리가 늘어난다.
+
+### `joint_efforts`
+
+저장하지 않는다.
+
+- 현재 Indy7 `/joint_states`의 `effort` 필드가 빈 배열(`[]`)로 publish된다.
+- 그대로 저장하면 `joint_efforts`가 `(N, 0)`으로 남아 스키마와 학습 feature를 헷갈리게 만든다.
+- 향후 드라이버가 6축 effort를 안정적으로 publish하면 스키마와 LeRobot 변환 코드를 함께 업데이트한다.
 
 ### `episode_phase`
 

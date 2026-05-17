@@ -9,7 +9,6 @@
   - joint_names: (6,)
   - joint_positions: (N, 6)
   - joint_velocities: (N, 6)
-  - joint_efforts: (N, 6)
   - ee_poses: (N, 6) Indy native [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]
   - wrist_rgb_images: (N, H, W, 3) uint8
   - wrist_depth_images: (N, H, W) uint16  (optional legacy/depth profile)
@@ -20,7 +19,7 @@
 출력 LeRobotDataset( ACT baseline 기준 ) feature 매핑:
   - observation.images.front     : wrist_rgb_images[t]
   - observation.images.overhead  : overhead_rgb_images[t]
-  - observation.state            : [q, dq, tau] concat (18차원)
+  - observation.state            : [q, dq] concat (12차원)
   - action                       : action_space에 따라 [delta_q 또는 delta_ee_pose, gripper_action] concat (7차원)
 
 설계/주의사항:
@@ -146,7 +145,6 @@ def _build_features(h: int, w: int) -> dict[str, dict[str, Any]]:
     state_names = (
         [f"joint_positions_{i}" for i in range(6)]
         + [f"joint_velocities_{i}" for i in range(6)]
-        + [f"joint_efforts_{i}" for i in range(6)]
     )
     action_names = [f"delta_q_{i}" for i in range(6)] + ["gripper_action"]
 
@@ -187,7 +185,6 @@ def _build_features_ext(
     state_names = (
         [f"joint_positions_{i}" for i in range(6)]
         + [f"joint_velocities_{i}" for i in range(6)]
-        + [f"joint_efforts_{i}" for i in range(6)]
     )
     if ee_pose_cols == 6:
         state_names += [f"ee_pose_{label}" for label in ["x", "y", "z", "rx", "ry", "rz"]]
@@ -385,7 +382,7 @@ def main() -> None:
         "--state_profile",
         choices=["baseline", "extended"],
         default="baseline",
-        help="baseline: q/dq/tau(18D). extended: +ee_pose(7)+gripper_state(1)=26D; "
+        help="baseline: q/dq(12D). extended: +ee_pose(7)+gripper_state(1)=20D; "
         "ee_pose는 NPZ 키 또는 --fk_urdf FK; gripper_state 없으면 gripper_actions[t].",
     )
     parser.add_argument(
@@ -442,7 +439,6 @@ def main() -> None:
         overhead_rgb0 = ep0["overhead_rgb_images"]
         q0 = _ensure_joint_matrix_n6(ep0["joint_positions"], "joint_positions")
         dq0 = _ensure_joint_matrix_n6(ep0["joint_velocities"], "joint_velocities")
-        tau0 = _ensure_joint_matrix_n6(ep0["joint_efforts"], "joint_efforts")
 
         # wrist_rgb_images: (N, H, W, 3)
         if wrist_rgb0.ndim != 4 or wrist_rgb0.shape[-1] != 3:
@@ -538,7 +534,6 @@ def main() -> None:
 
             joint_positions = _ensure_joint_matrix_n6(ep["joint_positions"], "joint_positions")
             joint_velocities = _ensure_joint_matrix_n6(ep["joint_velocities"], "joint_velocities")
-            joint_efforts = _ensure_joint_matrix_n6(ep["joint_efforts"], "joint_efforts")
             wrist_rgb_images = ep["wrist_rgb_images"].astype(np.uint8)
             overhead_rgb_images = ep["overhead_rgb_images"].astype(np.uint8)
             wrist_depth_images = ep["wrist_depth_images"] if "wrist_depth_images" in ep else None
@@ -597,7 +592,6 @@ def main() -> None:
                 continue
             q_t = joint_positions[t]  # (6,)
             dq_t = joint_velocities[t]
-            tau_t = joint_efforts[t]
 
             if args.action_space == "cartesian":
                 assert ee_pose_mat is not None
@@ -606,7 +600,7 @@ def main() -> None:
                 delta_action = joint_positions[t + 1] - joint_positions[t]  # (6,)
             gripper_cmd = float(gripper_actions[t])
 
-            state_vec = np.concatenate([q_t, dq_t, tau_t], axis=0).astype(np.float32)
+            state_vec = np.concatenate([q_t, dq_t], axis=0).astype(np.float32)
             if include_ee_pose:
                 assert ee_pose_mat is not None
                 ee_vec = ee_pose_mat[t]

@@ -223,7 +223,8 @@ ros2 run pipet_system_teleop system_teleop_node
 | `home_joint_deg` | (6,) | 수집 당시 홈 포지션 metadata, 학습 변환 제외 |
 | `camera_setup` | () | 카메라 구성 metadata, 예: `wrist+overhead_rgb`, 학습 변환 제외 |
 | `joint_names` | (6,) | `joint_positions`의 관절 이름 순서 |
-| `joint_positions/velocities/efforts` | (N, 6) | Indy7 관절 (rad) |
+| `joint_positions` | (N, 6) | Indy7 관절 위치 (rad) |
+| `joint_velocities` | (N, 6) | Indy7 관절 속도 |
 | `ee_poses` | (N, 6) | EE pose `[x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]` (movetelel용) |
 | `wrist_rgb_images` | (N, 480, 640, 3) | 손목 카메라 RGB |
 | `overhead_rgb_images` | (N, 480, 640, 3) | 오버헤드 카메라 RGB |

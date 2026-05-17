@@ -41,7 +41,6 @@ observation_t → action_t
 | `timestamp`       | `(N,)`             | 녹화 시작 기준 상대 시간                                                                                   |
 | `joint_positions`  | `(N, 6)`           | Indy7 관절 각도 (rad)                                                                                |
 | `joint_velocities` | `(N, 6)`           | Indy7 관절 속도 (rad/s)                                                                              |
-| `joint_efforts`    | `(N, 6)`           | Indy7 관절 토크 (N·m)                                                                                |
 | `ee_pose`          | `(N, 7)`           | 엔드이펙터(Mark7 그리퍼 기준점)의 pose — Indy7 base 좌표계 기준 위치 `(x, y, z)` 와 자세 quaternion `(qx, qy, qz, qw)` |
 | `wrist_rgb_images`    | `(N, 480, 640, 3)` | 손목 카메라 RGB 이미지                                                                                |
 | `wrist_depth_images`  | `(N, 480, 640)`    | 손목 카메라 Depth 이미지 (mm)                                                                         |
@@ -128,7 +127,6 @@ observation_t =
   overhead_depth_images[t],
   joint_positions[t],
   joint_velocities[t],
-  joint_efforts[t],
   ee_pose[t],
   gripper_state[t]
 }
@@ -184,7 +182,6 @@ arm_actions[t] = joint_positions[t+1] - joint_positions[t]
 * `overhead_depth_images`
 * `joint_positions`
 * `joint_velocities`
-* `joint_efforts`
 * `ee_pose`
 * `gripper_state`
 
@@ -328,7 +325,7 @@ q_target = q_current + arm_actions_t
 │                        │   (ApproximateTimeSynchronizer)               │
 │                        ▼                                               │
 │  observation 원본 저장:                                                │
-│  joint_positions, joint_velocities, joint_efforts, ee_pose,           │
+│  joint_positions, joint_velocities, ee_pose,                         │
 │  wrist_rgb/depth, overhead_rgb/depth, gripper_state, gripper_actions  │
 └──────────────────────────────┬───────────────────────────────────────┘
                                │
@@ -359,8 +356,7 @@ q_target = q_current + arm_actions_t
 │  입력 (observation)                                                  │
 │  ┌────────────────────────────────────────────────────────────────┐   │
 │  │ wrist_rgb/depth, overhead_rgb/depth, joint_positions,          │   │
-│  │ joint_velocities,                                            │   │
-│  │ joint_efforts, ee_pose, gripper_state                         │   │
+│  │ joint_velocities, ee_pose, gripper_state                      │   │
 │  └────────────────────────────────────────────────────────────────┘   │
 │                               │                                      │
 │                 ┌─────────────┴─────────────┐                        │

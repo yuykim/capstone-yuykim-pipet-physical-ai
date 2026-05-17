@@ -158,7 +158,6 @@ class DataCollectorNode(Node):
         self.joint_names: List[str] = []
         self.joint_positions: List[List[float]] = []
         self.joint_velocities: List[List[float]] = []
-        self.joint_efforts: List[List[float]] = []
         self.wrist_rgb_images: List[np.ndarray] = []
         self.overhead_rgb_images: List[np.ndarray] = []
         self.gripper_actions: List[int] = []
@@ -283,7 +282,6 @@ class DataCollectorNode(Node):
         self.timestamps.append(relative_time)
         self.joint_positions.append(list(joint_msg.position))
         self.joint_velocities.append(list(joint_msg.velocity))
-        self.joint_efforts.append(list(joint_msg.effort))
 
         # Wrist camera (RGB only)
         try:
@@ -334,7 +332,6 @@ class DataCollectorNode(Node):
             joint_names=np.array(self.joint_names, dtype=str),
             joint_positions=np.array(self.joint_positions, dtype=np.float32),
             joint_velocities=np.array(self.joint_velocities, dtype=np.float32),
-            joint_efforts=np.array(self.joint_efforts, dtype=np.float32),
             ee_poses=np.array(self.ee_poses, dtype=np.float32),
             wrist_rgb_images=np.array(self.wrist_rgb_images, dtype=np.uint8),
             overhead_rgb_images=np.array(self.overhead_rgb_images, dtype=np.uint8),
