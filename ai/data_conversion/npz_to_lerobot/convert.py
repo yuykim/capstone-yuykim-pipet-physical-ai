@@ -6,6 +6,7 @@
   - timestamps: (N,)
   - home_joint_deg: (6,) metadata only; ignored during LeRobot conversion
   - camera_setup: () metadata only; ignored during LeRobot conversion
+  - task_name: () metadata only; optional remove/insert task marker
   - joint_names: (6,)
   - joint_positions: (N, 6)
   - joint_velocities: (N, 6)
@@ -15,6 +16,8 @@
   - overhead_rgb_images: (N, H, W, 3) uint8
   - overhead_depth_images: (N, H, W) uint16 (optional legacy/depth profile)
   - gripper_actions: (N,) int8 모드 (0=유지, 1=잡기, 2=펴기, 3=누르기, 4=엄지 펴기)
+  - final_gripper_action: () int8 metadata only; ignored during LeRobot conversion
+  - quality_warnings: (M,) str metadata only; ignored during LeRobot conversion
 
 출력 LeRobotDataset( ACT baseline 기준 ) feature 매핑:
   - observation.images.front     : wrist_rgb_images[t]

@@ -19,12 +19,24 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 from sensor_msgs.msg import JointState, Image
-from std_msgs.msg import Bool, Float64MultiArray
+from std_msgs.msg import Bool, Float64MultiArray, String
 from std_srvs.srv import Trigger
 from pipet_hand_mark7_msgs.msg import GripperStatus
 
 from cv_bridge import CvBridge
 import message_filters
+
+
+GRIPPER_ACTION_NAMES = {
+    0: 'hold',
+    1: 'grasp',
+    2: 'open',
+    3: 'press',
+    4: 'release',
+}
+
+HOLDING_GRIPPER_ACTIONS = {1, 3}
+RELEASED_GRIPPER_ACTIONS = {2, 4}
 
 
 class DataCollectorNode(Node):
@@ -44,6 +56,7 @@ class DataCollectorNode(Node):
         self.declare_parameter('sync_slop', 1.0)
         self.declare_parameter('home_joint_deg', [0.00, 25.00, -115.000, 90.0, 0.00, 0.000])
         self.declare_parameter('camera_setup', 'wrist+overhead_rgb')
+        self.declare_parameter('task_name', '')
 
         self.output_dir = os.path.expanduser(
             self.get_parameter('output_dir').get_parameter_value().string_value
@@ -55,9 +68,14 @@ class DataCollectorNode(Node):
         self.camera_setup = (
             self.get_parameter('camera_setup').get_parameter_value().string_value
         )
+        self.task_name = self._sanitize_task_name(
+            self.get_parameter('task_name').get_parameter_value().string_value
+        )
+        self._episode_task_name = self.task_name
 
         os.makedirs(self.output_dir, exist_ok=True)
         self.get_logger().info(f'Output directory: {self.output_dir}')
+        self.get_logger().info(f'Initial task name: {self.task_name or "default"}')
 
         # CV Bridge
         self.cv_bridge = CvBridge()
@@ -91,6 +109,11 @@ class DataCollectorNode(Node):
             Bool, '/data_collector/is_recording', qos
         )
         self.status_timer = self.create_timer(0.5, self._publish_status)
+
+        self.create_subscription(
+            String, '/data_collector/task_name',
+            self._task_name_cb, 10
+        )
 
         # Gripper action services (to intercept gripper commands for logging)
         self.gripper_action_srv_grasp = self.create_service(
@@ -152,6 +175,11 @@ class DataCollectorNode(Node):
 
         self.get_logger().info('DataCollectorNode initialized (3-topic sync + gripper/ee_pose cache)')
 
+    @staticmethod
+    def _sanitize_task_name(value: str) -> str:
+        cleaned = str(value).strip().lower().replace(' ', '_')
+        return ''.join(ch for ch in cleaned if ch.isalnum() or ch in ('_', '-'))
+
     def _clear_buffers(self):
         """Clear all data buffers."""
         self.timestamps: List[float] = []
@@ -165,6 +193,18 @@ class DataCollectorNode(Node):
 
     # -- Service callbacks --
 
+    def _task_name_cb(self, msg: String):
+        task_name = self._sanitize_task_name(msg.data)
+        if self.is_recording and task_name != self._episode_task_name:
+            self.get_logger().warn(
+                f'Ignoring task change while recording: '
+                f'{self._episode_task_name or "default"} -> {task_name or "default"}'
+            )
+            return
+        if task_name != self.task_name:
+            self.task_name = task_name
+            self.get_logger().info(f'Data collector task set to: {self.task_name or "default"}')
+
     def _start_callback(self, request, response):
         if self.is_recording:
             response.success = False
@@ -174,12 +214,15 @@ class DataCollectorNode(Node):
         self._clear_buffers()
         self.is_recording = True
         self.recording_start_time = self.get_clock().now().nanoseconds / 1e9
-        self._current_gripper_action = 0
+        self._episode_task_name = self.task_name
         self._episode_success = None
         self.episode_count += 1
 
         response.success = True
-        response.message = f'Recording started (episode {self.episode_count})'
+        response.message = (
+            f'Recording started (episode {self.episode_count}, '
+            f'task={self._episode_task_name or "default"})'
+        )
         self.get_logger().info(response.message)
         return response
 
@@ -197,7 +240,7 @@ class DataCollectorNode(Node):
             response.message = 'No data collected'
             return response
 
-        filepath = self._save_episode()
+        filepath, warnings = self._save_episode()
         duration = self.timestamps[-1] - self.timestamps[0] if sample_count > 1 else 0.0
         rate = sample_count / duration if duration > 0 else 0.0
 
@@ -206,6 +249,10 @@ class DataCollectorNode(Node):
             f'Episode saved: {os.path.abspath(filepath)} '
             f'({sample_count} frames, {duration:.1f}s, {rate:.1f}Hz)'
         )
+        if warnings:
+            response.message += f' Warnings: {"; ".join(warnings)}'
+            for warning in warnings:
+                self.get_logger().warn(warning)
         self.get_logger().info(response.message)
         return response
 
@@ -310,8 +357,35 @@ class DataCollectorNode(Node):
 
     # -- Save --
 
-    def _save_episode(self) -> str:
-        """Save current episode as NPZ. Returns the file path."""
+    def _expected_final_gripper_actions(self, task_name: str):
+        task = task_name.lower()
+        if task in ('remove', 'pick', 'pull', 'extract'):
+            return 'holding', HOLDING_GRIPPER_ACTIONS
+        if task in ('insert', 'return', 'place'):
+            return 'released', RELEASED_GRIPPER_ACTIONS
+        return None, set()
+
+    def _episode_quality_warnings(self, task_name: str) -> List[str]:
+        warnings: List[str] = []
+        if not self.gripper_actions:
+            warnings.append('No gripper_actions were recorded.')
+            return warnings
+
+        final_action = int(self.gripper_actions[-1])
+        expected_name, expected_actions = self._expected_final_gripper_actions(task_name)
+        if expected_name and final_action not in expected_actions:
+            final_name = GRIPPER_ACTION_NAMES.get(final_action, f'unknown({final_action})')
+            expected_list = ', '.join(
+                GRIPPER_ACTION_NAMES[action] for action in sorted(expected_actions)
+            )
+            warnings.append(
+                f'task={task_name}: expected final gripper state {expected_name} '
+                f'({expected_list}), got {final_name}.'
+            )
+        return warnings
+
+    def _save_episode(self):
+        """Save current episode as NPZ. Returns the file path and quality warnings."""
         timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
         if self._episode_success is True:
             label = 'success'
@@ -319,16 +393,26 @@ class DataCollectorNode(Node):
             label = 'fail'
         else:
             label = 'unlabeled'
-        save_dir = os.path.join(self.output_dir, label)
+
+        task_name = self._episode_task_name
+        save_parts = [self.output_dir]
+        if task_name:
+            save_parts.append(task_name)
+        save_parts.append(label)
+        save_dir = os.path.join(*save_parts)
         os.makedirs(save_dir, exist_ok=True)
-        filename = f'episode_{timestamp_str}_{label}.npz'
+        task_suffix = f'_{task_name}' if task_name else ''
+        filename = f'episode_{timestamp_str}{task_suffix}_{label}.npz'
         filepath = os.path.join(save_dir, filename)
+        final_gripper_action = int(self.gripper_actions[-1]) if self.gripper_actions else 0
+        quality_warnings = self._episode_quality_warnings(task_name)
 
         np.savez_compressed(
             filepath,
             timestamps=np.array(self.timestamps, dtype=np.float64),
             home_joint_deg=np.array(self.home_joint_deg, dtype=np.float32),
             camera_setup=np.array(self.camera_setup),
+            task_name=np.array(task_name),
             joint_names=np.array(self.joint_names, dtype=str),
             joint_positions=np.array(self.joint_positions, dtype=np.float32),
             joint_velocities=np.array(self.joint_velocities, dtype=np.float32),
@@ -336,11 +420,13 @@ class DataCollectorNode(Node):
             wrist_rgb_images=np.array(self.wrist_rgb_images, dtype=np.uint8),
             overhead_rgb_images=np.array(self.overhead_rgb_images, dtype=np.uint8),
             gripper_actions=np.array(self.gripper_actions, dtype=np.int8),
+            final_gripper_action=np.array(final_gripper_action, dtype=np.int8),
+            quality_warnings=np.array(quality_warnings, dtype=str),
         )
 
         size_mb = os.path.getsize(filepath) / (1024 * 1024)
         self.get_logger().info(f'Saved {filepath} ({size_mb:.1f} MB)')
-        return filepath
+        return filepath, quality_warnings
 
     # -- Status --
 

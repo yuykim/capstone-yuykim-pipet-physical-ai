@@ -113,7 +113,7 @@ source install/setup.bash
 ros2 run pipet_system_teleop xbox_servo_node --ros-args -p debug_input:=false
 ```
 
-→ Xbox 패드로 Indy7 상대 텔레옵, Mark7 그리퍼, 녹화 시작/중지/라벨링을 모두 제어할 수 있다. 녹화 종료 후 라벨링까지 하면 episode NPZ가 `episodes/success`, `episodes/fail`, `episodes/unlabeled` 아래에 저장된다.
+→ Xbox 패드로 Indy7 상대 텔레옵, Mark7 그리퍼, 녹화 시작/중지/라벨링을 모두 제어할 수 있다. 기본값은 2단계 수집 모드이며, remove episode는 `episodes/remove/<label>/`, insert episode는 `episodes/insert/<label>/` 아래에 저장된다.
 
 ### 카메라 노드 확인
 ```bash
@@ -207,21 +207,31 @@ ros2 run pipet_system_teleop system_teleop_node
 
 1. 터미널 2에서 `xbox_servo_node` 실행
 2. D-pad와 LT/RT/오른쪽 스틱으로 Indy7 조작
-3. **`START`** → 녹화 시작
+3. **REMOVE** 상태에서 **`START`** → 뽑기 녹화 시작
 4. A/B/X/Y로 Mark7 그리퍼 조작
 5. **`START`** → **`A`(성공) / `B`(실패) / `X`(폐기)**
+6. remove 성공 저장 후 UI가 insert 수집 여부를 물으면 **`A`**로 insert 모드 진입, **`B`**로 건너뛰기
+7. insert 모드에서 로봇을 임의의 시작 위치로 옮긴 뒤 **`START`** → 꽂기 녹화 시작
+8. **`START`** → **`A`(성공) / `B`(실패) / `X`(폐기)**
 
 ---
 
 ## 5. 데이터 형식 (NPZ)
 
-저장 위치: `episodes/<success|fail|unlabeled>/episode_YYYYMMDD_HHMMSS_<label>.npz`
+저장 위치:
+
+```text
+episodes/<task_name>/<success|fail|unlabeled>/episode_YYYYMMDD_HHMMSS_<task_name>_<label>.npz
+```
+
+`task_name`이 비어 있는 기존 수집 경로는 `episodes/<success|fail|unlabeled>/...` 형식을 유지한다.
 
 | 키 | Shape | 설명 |
 |---|---|---|
 | `timestamps` | (N,) | 녹화 시작 기준 상대 시간 |
 | `home_joint_deg` | (6,) | 수집 당시 홈 포지션 metadata, 학습 변환 제외 |
 | `camera_setup` | () | 카메라 구성 metadata, 예: `wrist+overhead_rgb`, 학습 변환 제외 |
+| `task_name` | () | 작업 metadata, 예: `remove`, `insert` |
 | `joint_names` | (6,) | `joint_positions`의 관절 이름 순서 |
 | `joint_positions` | (N, 6) | Indy7 관절 위치 (rad) |
 | `joint_velocities` | (N, 6) | Indy7 관절 속도 |
@@ -229,8 +239,11 @@ ros2 run pipet_system_teleop system_teleop_node
 | `wrist_rgb_images` | (N, 480, 640, 3) | 손목 카메라 RGB |
 | `overhead_rgb_images` | (N, 480, 640, 3) | 오버헤드 카메라 RGB |
 | `gripper_actions` | (N,) | 모드: 0=hold 1=grasp 2=open 3=press 4=release |
+| `final_gripper_action` | () | 마지막 그리퍼 mode |
+| `quality_warnings` | (M,) | task별 마지막 그리퍼 상태 점검 경고 |
 
 > Depth는 수집 안 함. 동기화: joint + wrist RGB + overhead RGB (3토픽). gripper/ee_pose는 캐시.
+> remove는 마지막 그리퍼가 grasp/press 계열인지, insert는 open/release 계열인지 저장 시 점검한다.
 
 ---
 

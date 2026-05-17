@@ -24,7 +24,7 @@ import pygame
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, Float64MultiArray
+from std_msgs.msg import Bool, Float64MultiArray, String
 from std_srvs.srv import Trigger
 from indy_interfaces.srv import IndyService
 
@@ -58,6 +58,16 @@ ACTION_GRASP = 1
 ACTION_OPEN = 2
 ACTION_PRESS = 3
 ACTION_RELEASE = 4
+
+GRIPPER_ACTION_NAMES = {
+    0: 'hold',
+    1: 'grasp',
+    2: 'open',
+    3: 'press',
+    4: 'release',
+}
+HOLDING_GRIPPER_ACTIONS = {ACTION_GRASP, ACTION_PRESS}
+RELEASED_GRIPPER_ACTIONS = {ACTION_OPEN, ACTION_RELEASE}
 
 BTN_A = 0
 BTN_B = 1
@@ -118,6 +128,9 @@ class XboxServoNode(Node):
         self.declare_parameter('angular_step_deg', ANGULAR_STEP_DEG)
         self.declare_parameter('deadzone', DEADZONE)
         self.declare_parameter('debug_input', False)
+        self.declare_parameter('two_stage_collection', True)
+        self.declare_parameter('remove_task_name', 'remove')
+        self.declare_parameter('insert_task_name', 'insert')
 
         self.indy_ip = self.get_parameter('indy_ip').value
         self.input_backend = self.get_parameter('input_backend').value
@@ -128,8 +141,13 @@ class XboxServoNode(Node):
         self.angular_step = float(self.get_parameter('angular_step_deg').value)
         self.deadzone = float(self.get_parameter('deadzone').value)
         self.debug_input = bool(self.get_parameter('debug_input').value)
+        self.two_stage_collection = bool(self.get_parameter('two_stage_collection').value)
+        self.remove_task_name = self._sanitize_task_name(self.get_parameter('remove_task_name').value)
+        self.insert_task_name = self._sanitize_task_name(self.get_parameter('insert_task_name').value)
 
         self.pose_pub = self.create_publisher(Float64MultiArray, '/indy/teleop_pose', 10)
+        self.task_pub = self.create_publisher(String, '/data_collector/task_name', 10)
+        self.task_pub_timer = self.create_timer(0.5, self._publish_current_task)
 
         self.create_subscription(Float64MultiArray, '/indy/ee_pose', self._ee_pose_cb, 10)
         self.create_subscription(JointState, '/joint_states', self._joint_state_cb, 10)
@@ -159,6 +177,15 @@ class XboxServoNode(Node):
         self.teleop_mode = None
         self.is_recording = False
         self.awaiting_label = False
+        self.collection_task = self.remove_task_name if self.two_stage_collection else ''
+        self.recording_task = None
+        self.workflow_prompt = None
+        self.workflow_status = (
+            'REMOVE ready: START records.'
+            if self.two_stage_collection
+            else 'Manual collection mode.'
+        )
+        self.last_gripper_action = 0
         self.is_running = True
         self._prev_buttons = {}
         self._last_debug_state = None
@@ -244,9 +271,57 @@ class XboxServoNode(Node):
         print('  Speed:      BACK+LB=slower   BACK+RB=faster')
         print('  Gripper:    A=grasp  B=open  X=press  Y=release')
         print('  Recording:  START=start/label stop, then A=success B=fail X=discard')
+        print('  Workflow:   remove -> ask insert; A=arm insert, B=skip insert')
         print('  Indy7:      BACK=stop teleop   BACK+B=zero   BACK+Y=home   BACK+A=recover')
         print('  Quit:       window close or Ctrl+C')
         print('=' * 72 + '\n')
+
+    @staticmethod
+    def _sanitize_task_name(value: str) -> str:
+        cleaned = str(value).strip().lower().replace(' ', '_')
+        return ''.join(ch for ch in cleaned if ch.isalnum() or ch in ('_', '-'))
+
+    def _task_label(self, task_name=None):
+        task = self.collection_task if task_name is None else task_name
+        return task.upper() if task else 'MANUAL'
+
+    def _publish_current_task(self, repeat: int = 1):
+        msg = String()
+        msg.data = self.collection_task
+        for _ in range(max(1, repeat)):
+            self.task_pub.publish(msg)
+
+    def _set_collection_task(self, task_name: str, status: str):
+        self.collection_task = self._sanitize_task_name(task_name)
+        self.workflow_status = status
+        self._publish_current_task()
+        print(f'Collection task: {self._task_label()} - {status}')
+
+    def _expected_final_gripper_actions(self, task_name: str):
+        task = task_name.lower()
+        if task in ('remove', 'pick', 'pull', 'extract'):
+            return 'holding', HOLDING_GRIPPER_ACTIONS
+        if task in ('insert', 'return', 'place'):
+            return 'released', RELEASED_GRIPPER_ACTIONS
+        return None, set()
+
+    def _final_gripper_warning(self, task_name: str):
+        expected_name, expected_actions = self._expected_final_gripper_actions(task_name)
+        if not expected_name:
+            return None
+        if self.last_gripper_action in expected_actions:
+            return None
+        final_name = GRIPPER_ACTION_NAMES.get(
+            self.last_gripper_action,
+            f'unknown({self.last_gripper_action})',
+        )
+        expected_list = ', '.join(
+            GRIPPER_ACTION_NAMES[action] for action in sorted(expected_actions)
+        )
+        return (
+            f'CHECK WARNING: {self._task_label(task_name)} should finish with '
+            f'gripper {expected_name} ({expected_list}), but last action is {final_name}.'
+        )
 
     def _ee_pose_cb(self, msg: Float64MultiArray):
         if len(msg.data) == 6:
@@ -457,28 +532,43 @@ class XboxServoNode(Node):
     def _handle_gripper(self, action: int):
         if action == ACTION_GRASP:
             print('Gripper: GRASP')
-            self._call_trigger(self.gripper_grasp)
-            self._call_trigger(self.log_grasp)
+            gripper_ok = self._call_trigger(self.gripper_grasp)
+            log_ok = self._call_trigger(self.log_grasp)
         elif action == ACTION_OPEN:
             print('Gripper: OPEN')
-            self._call_trigger(self.gripper_open)
-            self._call_trigger(self.log_open)
+            gripper_ok = self._call_trigger(self.gripper_open)
+            log_ok = self._call_trigger(self.log_open)
         elif action == ACTION_PRESS:
             print('Gripper: PRESS')
-            self._call_trigger(self.gripper_press)
-            self._call_trigger(self.log_press)
+            gripper_ok = self._call_trigger(self.gripper_press)
+            log_ok = self._call_trigger(self.log_press)
         elif action == ACTION_RELEASE:
             print('Gripper: RELEASE')
-            self._call_trigger(self.gripper_release)
-            self._call_trigger(self.log_release)
+            gripper_ok = self._call_trigger(self.gripper_release)
+            log_ok = self._call_trigger(self.log_release)
+        else:
+            return
+
+        if gripper_ok or log_ok:
+            self.last_gripper_action = action
 
     def _handle_record_button(self):
+        if self.workflow_prompt:
+            print('Choose workflow first: A=collect INSERT / B=skip INSERT')
+            return
         if self.is_recording:
             self.awaiting_label = True
+            task = self.recording_task or self.collection_task
+            warning = self._final_gripper_warning(task)
+            if warning:
+                print(warning)
             print('Result? A=success / B=fail / X=discard')
             return
-        print('Starting recording...')
-        self._call_trigger(self.data_start)
+        self.recording_task = self.collection_task
+        self._publish_current_task(repeat=3)
+        print(f'Starting {self._task_label(self.recording_task)} recording...')
+        if not self._call_trigger(self.data_start):
+            self.recording_task = None
 
     def _adjust_speed(self, direction: int):
         self.linear_step = min(
@@ -496,19 +586,68 @@ class XboxServoNode(Node):
 
     def _finish_recording(self, label: str):
         self.awaiting_label = False
+        finished_task = self.recording_task or self.collection_task
         if label == 'discard':
-            print('Discarding recording...')
+            print(f'Discarding {self._task_label(finished_task)} recording...')
             self._call_trigger(self.data_discard)
+            self.recording_task = None
             return
 
+        warning = self._final_gripper_warning(finished_task)
+        if warning:
+            print(warning)
+
         if label == 'success':
-            print('Marking SUCCESS and saving...')
+            print(f'Marking {self._task_label(finished_task)} SUCCESS and saving...')
             self._call_trigger(self.data_mark_success)
         else:
-            print('Marking FAIL and saving...')
+            print(f'Marking {self._task_label(finished_task)} FAIL and saving...')
             self._call_trigger(self.data_mark_fail)
 
         self._call_trigger(self.data_stop, timeout=300.0)
+        self._after_recording_finished(finished_task, label)
+
+    def _after_recording_finished(self, finished_task: str, label: str):
+        self.recording_task = None
+        if not self.two_stage_collection:
+            return
+
+        if finished_task == self.remove_task_name and label == 'success':
+            self.workflow_prompt = 'ask_insert'
+            self.workflow_status = (
+                'REMOVE saved. A=arm INSERT, B=skip.'
+            )
+            print(self.workflow_status)
+        elif finished_task == self.insert_task_name:
+            self.workflow_prompt = None
+            self._set_collection_task(
+                self.remove_task_name,
+                'INSERT saved. Next REMOVE ready.',
+            )
+        elif finished_task == self.remove_task_name:
+            self._set_collection_task(
+                self.remove_task_name,
+                'Repeat REMOVE when ready.',
+            )
+
+    def _handle_workflow_prompt(self, button: int) -> bool:
+        if self.workflow_prompt != 'ask_insert':
+            return False
+        if button == BTN_A:
+            self.workflow_prompt = None
+            self._set_collection_task(
+                self.insert_task_name,
+                'INSERT armed. Move robot, then START records.',
+            )
+            return True
+        if button == BTN_B:
+            self.workflow_prompt = None
+            self._set_collection_task(
+                self.remove_task_name,
+                'INSERT skipped. Next REMOVE ready.',
+            )
+            return True
+        return True
 
     def _handle_joybuttondown(self, button: int):
         if self.awaiting_label:
@@ -518,6 +657,9 @@ class XboxServoNode(Node):
                 self._finish_recording('fail')
             elif button == BTN_X:
                 self._finish_recording('discard')
+            return
+
+        if self._handle_workflow_prompt(button):
             return
 
         back = self._button(BTN_BACK)
@@ -621,12 +763,20 @@ class XboxServoNode(Node):
 
     def _update_screen(self):
         self.screen.fill((18, 22, 26))
+        shown_task = self.recording_task if self.is_recording else self.collection_task
+        gripper_name = GRIPPER_ACTION_NAMES.get(
+            self.last_gripper_action,
+            f'unknown({self.last_gripper_action})',
+        )
         lines = [
             'Pipet Xbox Teleop',
             f'controller: {self.input_name} ({self.input_backend})',
             f'cart step: {self.linear_step:.1f} mm / {self.angular_step:.1f} deg',
             f'teleop mode: {self.teleop_mode or "idle"}',
+            f'task: {self._task_label(shown_task)}',
             f'recording: {"YES" if self.is_recording else "NO"}',
+            f'last gripper: {gripper_name}',
+            f'workflow: {self.workflow_status}',
             'Move D-pad + LT/RT | Rotate right stick + LB/RB',
             'Speed BACK+LB slower | BACK+RB faster',
             'Gripper A=grasp B=open X=press Y=release',
@@ -634,14 +784,20 @@ class XboxServoNode(Node):
         ]
         if self.awaiting_label:
             lines.append('WAITING LABEL: A success / B fail / X discard')
+        elif self.workflow_prompt == 'ask_insert':
+            lines.append('COLLECT INSERT? A yes / B skip')
         for idx, line in enumerate(lines):
             color = (240, 240, 240)
-            if idx == 4:
+            if line.startswith('task:'):
+                color = (120, 190, 255)
+            if line.startswith('recording:'):
                 color = (80, 220, 120) if self.is_recording else (220, 220, 120)
             if self.awaiting_label and idx == len(lines) - 1:
                 color = (255, 190, 90)
+            if self.workflow_prompt and idx == len(lines) - 1:
+                color = (255, 190, 90)
             surf = self.font.render(line, True, color)
-            self.screen.blit(surf, (24, 24 + idx * 34))
+            self.screen.blit(surf, (24, 20 + idx * 28))
         pygame.display.flip()
 
     def run(self):

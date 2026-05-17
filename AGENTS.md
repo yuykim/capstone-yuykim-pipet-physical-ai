@@ -80,13 +80,13 @@ For ROS package changes, prefer `colcon build --symlink-install --packages-selec
 Collected NPZ episodes are expected to contain:
 
 - `timestamps`: `(N,)`
+- `task_name`: scalar string metadata such as `remove` or `insert`
 - `joint_positions`: `(N, 6)`
 - `joint_velocities`: `(N, 6)`
 - `wrist_rgb_images`: `(N, H, W, 3)`
-- `wrist_depth_images`: `(N, H, W)`
 - `overhead_rgb_images`: `(N, H, W, 3)`
-- `overhead_depth_images`: `(N, H, W)`
 - `gripper_actions`: `(N,)`, where `0=hold`, `1=grasp`, `2=open`, `3=press`, `4=release`
-- `success`: scalar bool
+- `final_gripper_action`: scalar int8
+- `quality_warnings`: `(M,)` string warnings
 
-Episodes may be stored under `episodes/success/`, `episodes/fail/`, or `episodes/unlabeled/`.
+Episodes may be stored under `episodes/<task_name>/success/`, `episodes/<task_name>/fail/`, or `episodes/<task_name>/unlabeled/`. Legacy/manual episodes may still be stored directly under `episodes/success/`, `episodes/fail/`, or `episodes/unlabeled/`.

@@ -245,13 +245,16 @@ float32 temperature # 온도 (°C)
 
 #### NPZ 저장 형식
 
-저장 경로: `episodes/<success|fail|unlabeled>/episode_<YYYYMMDD_HHMMSS>_<label>.npz`
+저장 경로: `episodes/<task_name>/<success|fail|unlabeled>/episode_<YYYYMMDD_HHMMSS>_<task_name>_<label>.npz`
+
+`task_name`이 비어 있는 기존/수동 수집은 `episodes/<success|fail|unlabeled>/episode_<YYYYMMDD_HHMMSS>_<label>.npz` 경로를 유지한다.
 
 | 키 | Shape | dtype | 설명 |
 |----|-------|-------|------|
 | `timestamps` | (N,) | float64 | 녹화 시작 기준 상대 시간 (초) |
 | `home_joint_deg` | (6,) | float32 | 수집 당시 홈 포지션 metadata, 학습 변환 제외 |
 | `camera_setup` | () | str | 카메라 구성 metadata, 학습 변환 제외 |
+| `task_name` | () | str | 작업 metadata, 예: `remove`, `insert` |
 | `joint_positions` | (N, 6) | float32 | Indy7 관절 각도 (rad) |
 | `joint_velocities` | (N, 6) | float32 | Indy7 관절 속도 (rad/s) |
 | `wrist_rgb_images` | (N, 480, 640, 3) | uint8 | 손목 카메라 RGB 이미지 |
@@ -259,6 +262,8 @@ float32 temperature # 온도 (°C)
 | `overhead_rgb_images` | (N, 480, 640, 3) | uint8 | 오버헤드 카메라 RGB 이미지 |
 | `overhead_depth_images` | (N, 480, 640) | uint16 | 오버헤드 카메라 Depth 이미지 (mm) |
 | `gripper_actions` | (N,) | int8 | 그리퍼 모드: 0=유지 / 1=잡기 / 2=펴기 / 3=파이펫 누르기 / 4=엄지 펴기(release) |
+| `final_gripper_action` | () | int8 | 마지막 그리퍼 mode |
+| `quality_warnings` | (M,) | str | task별 마지막 그리퍼 상태 점검 경고 |
 
 #### 런치 파라미터
 

@@ -22,6 +22,8 @@
 episodes/success/episode_YYYYMMDD_HHMMSS_success.npz
 episodes/fail/episode_YYYYMMDD_HHMMSS_fail.npz
 episodes/unlabeled/episode_YYYYMMDD_HHMMSS_unlabeled.npz
+episodes/remove/success/episode_YYYYMMDD_HHMMSS_remove_success.npz
+episodes/insert/success/episode_YYYYMMDD_HHMMSS_insert_success.npz
 ```
 
 ---
@@ -33,6 +35,7 @@ episodes/unlabeled/episode_YYYYMMDD_HHMMSS_unlabeled.npz
 | `timestamps` | `(N,)` | `float64` | 녹화 시작 기준 상대 시간 |
 | `home_joint_deg` | `(6,)` | `float32` | 수집 당시 home joint metadata |
 | `camera_setup` | `()` | `str` | 카메라 구성 metadata |
+| `task_name` | `()` | `str` | 작업 metadata, 예: `remove`, `insert` |
 | `joint_names` | `(6,)` | `str` | `joint_positions` column 순서 |
 | `joint_positions` | `(N, 6)` | `float32` | Indy7 관절 위치, rad |
 | `joint_velocities` | `(N, 6)` | `float32` | Indy7 관절 속도 |
@@ -40,8 +43,12 @@ episodes/unlabeled/episode_YYYYMMDD_HHMMSS_unlabeled.npz
 | `wrist_rgb_images` | `(N, H, W, 3)` | `uint8` | 손목 카메라 RGB |
 | `overhead_rgb_images` | `(N, H, W, 3)` | `uint8` | 오버헤드 카메라 RGB |
 | `gripper_actions` | `(N,)` | `int8` | 그리퍼 mode |
+| `final_gripper_action` | `()` | `int8` | 마지막 그리퍼 mode |
+| `quality_warnings` | `(M,)` | `str` | 마지막 그리퍼 상태 점검 경고 |
 
 `success`는 NPZ 내부에 저장하지 않는다. `fail`과 `unlabeled`가 둘 다 `False`로 뭉개지는 문제가 있어서, 라벨은 경로/파일명으로만 관리한다.
+
+Xbox 2단계 수집은 `remove`와 `insert`를 별도 task로 저장한다. `remove`는 마지막 그리퍼 action이 잡은 상태(`grasp`/`press`)인지, `insert`는 놓은 상태(`open`/`release`)인지 저장 시 점검한다.
 
 ---
 
