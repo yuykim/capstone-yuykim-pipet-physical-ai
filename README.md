@@ -73,6 +73,9 @@ source install/setup.bash
 
 ## 2. 데이터 수집 실행
 
+실제 수집 환경의 카메라/그리퍼 정렬, 파이펫 거치대 배치 가능 영역, 작업 공간 사진은
+[docs/data_collect_env/README.md](docs/data_collect_env/README.md)에 정리한다.
+
 ### 사전 점검
 ```bash
 ping 192.168.1.10                # 로봇 응답 확인
@@ -285,6 +288,7 @@ pipet-physical-ai/
 ├── docs/
 │   ├── architecture.md
 │   ├── interface_spec.md
+│   ├── data_collect_env/                 # 실제 데이터 수집 환경 사진과 배치 기준
 │   ├── mark7/architecture.md
 │   └── ai/
 │      ├── ai_architecture.md
@@ -308,6 +312,7 @@ pipet-physical-ai/
 
 - [docs/architecture.md](docs/architecture.md) — 전체 시스템 설계
 - [docs/interface_spec.md](docs/interface_spec.md) — ROS2 인터페이스 명세
+- [docs/data_collect_env/README.md](docs/data_collect_env/README.md) — 실제 데이터 수집 환경
 - [docs/ai/ai_architecture.md](docs/ai/ai_architecture.md) — AI 학습 전략
 - [docs/ai/lerobot_architecture.md](docs/ai/lerobot_architecture.md) — LeRobot 매핑
 - [docs/mark7/architecture.md](docs/mark7/architecture.md) — Mark7 상세 설계
