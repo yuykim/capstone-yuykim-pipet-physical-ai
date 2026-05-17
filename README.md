@@ -85,7 +85,7 @@ rs-enumerate-devices | grep "Serial Number"   # 카메라 2대 확인
 ### 터미널 1 — 백엔드 (필수)
 
 ```bash
-cd <repo_root>
+cd repo_<root>
 source /opt/ros/humble/setup.bash && source install/setup.bash
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 ros2 launch pipet_bringup data_collection.launch.py indy_ip:=192.168.1.10
@@ -103,6 +103,17 @@ ros2 run pipet_system_teleop keyboard_servo_node
 ```
 
 → Pygame 창에서 Indy7 상대 텔레옵, Mark7 그리퍼, 녹화 시작/중지/라벨링을 모두 제어.
+
+### 터미널 2 — Xbox 패드 텔레옵 / 녹화 제어 (패드 수집)
+
+```bash
+cd <repo_root>
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 run pipet_system_teleop xbox_servo_node --ros-args -p debug_input:=true
+```
+
+→ Xbox 패드로 Indy7 상대 텔레옵, Mark7 그리퍼, 녹화 시작/중지/라벨링을 모두 제어할 수 있다. 녹화 종료 후 라벨링까지 하면 episode NPZ가 `episodes/success`, `episodes/fail`, `episodes/unlabeled` 아래에 저장된다.
 
 ### 카메라 노드 확인
 ```bash
@@ -158,6 +169,21 @@ ros2 run pipet_system_teleop system_teleop_node
 | Y / N / X | 성공 저장 / 실패 저장 / 폐기 |
 | ESC | 종료 |
 
+### Xbox 패드 텔레옵
+
+| 입력 | 동작 |
+|---|---|
+| D-pad 위/아래 | x +/− |
+| D-pad 좌/우 | y +/− |
+| LT / RT | z −/+ |
+| 오른쪽 스틱 | rx/ry 회전 |
+| LB / RB | rz +/− |
+| BACK+LB / BACK+RB | Cartesian step 감소/증가 |
+| BACK / BACK+A / BACK+B / BACK+Y | Stop teleop / Recover / Zero / Home |
+| A / B / X / Y | Grasp / Open / Press / Release |
+| START | 녹화 시작, 녹화 중이면 라벨 입력 대기 |
+| A / B / X | 성공 저장 / 실패 저장 / 폐기 |
+
 ---
 
 ## 4. 워크플로우
@@ -176,6 +202,14 @@ ros2 run pipet_system_teleop system_teleop_node
 3. **`SPACE`** → 녹화 시작
 4. W/S/A/D/Q/E/U/O/I/K/J/L로 Indy7 조작 + G/F/B/V로 그리퍼 조작
 5. **`SPACE`** → **`Y`(성공) / `N`(실패) / `X`(폐기)**
+
+### Xbox 패드 (유선 컨트롤러 수집)
+
+1. 터미널 2에서 `xbox_servo_node` 실행
+2. D-pad와 LT/RT/오른쪽 스틱으로 Indy7 조작
+3. **`START`** → 녹화 시작
+4. A/B/X/Y로 Mark7 그리퍼 조작
+5. **`START`** → **`A`(성공) / `B`(실패) / `X`(폐기)**
 
 ---
 
