@@ -22,6 +22,7 @@ setup(
         'console_scripts': [
             'system_teleop_node = pipet_system_teleop.system_teleop_node:main',
             'keyboard_servo_node = pipet_system_teleop.keyboard_servo_node:main',
+            'xbox_servo_node = pipet_system_teleop.xbox_servo_node:main',
         ],
     },
 )
