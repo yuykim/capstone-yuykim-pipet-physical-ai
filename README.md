@@ -110,7 +110,7 @@ ros2 run pipet_system_teleop keyboard_servo_node
 cd <repo_root>
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-ros2 run pipet_system_teleop xbox_servo_node --ros-args -p debug_input:=true
+ros2 run pipet_system_teleop xbox_servo_node --ros-args -p debug_input:=false
 ```
 
 → Xbox 패드로 Indy7 상대 텔레옵, Mark7 그리퍼, 녹화 시작/중지/라벨링을 모두 제어할 수 있다. 녹화 종료 후 라벨링까지 하면 episode NPZ가 `episodes/success`, `episodes/fail`, `episodes/unlabeled` 아래에 저장된다.
