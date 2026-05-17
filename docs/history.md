@@ -258,6 +258,7 @@ sg dialout -c "python3 - <<'PY'\nimport os\nfd=os.open('/dev/ttyACM0', os.O_RDWR
 ### 2) ROS 그래프 점검: 궤적 토픽은 연결됨
 - `ros2 topic list`에 `/joint_trajectory_controller/joint_trajectory`가 보인다고 해서 **구독자가 있다고 단정할 수는 없음**
   (`inference_node`가 퍼블리셔만 있어도 토픽 이름은 목록에 뜰 수 있음).
+
 - 실제 확인 명령:
 ```bash
 ros2 topic info /joint_trajectory_controller/joint_trajectory -v
@@ -1407,3 +1408,289 @@ enable_gripper:=false
 - 너무 늦게 잡으면 `grasp_min_elapsed_steps`를 40으로 낮춤.
 - 아직 너무 빨리 잡으면 `grasp_min_elapsed_steps`를 60으로 올림.
 - grasp가 아예 안 나오면 `grasp_confirm_steps`를 줄이거나 `grasp_max_delta_norm`을 0.008 쪽으로 완화.
+
+---
+
+# 26.05.17 작성자: Codex
+
+## Xbox 패드 기반 Indy7 + Mark7 데이터 수집 텔레옵 추가
+
+### 1) 목표
+- 기존 키보드 기반 데이터 수집 흐름은 유지한다.
+- 추가로 Xbox 컨트롤러로도 Indy7 팔, Mark7 그리퍼, 데이터 수집 시작/종료/라벨링을 수행할 수 있게 한다.
+- 데이터 수집 서비스 계약(`/data_collector/start`, `stop`, `mark_success`, `mark_fail`, `discard`)과 그리퍼 action logging 서비스(`/data_collector/log_*`)는 기존 키보드 노드와 동일하게 사용한다.
+
+### 2) 추가된 코드
+- 새 노드:
+  - `ros2_ws/src/pipet_system_teleop/pipet_system_teleop/xbox_servo_node.py`
+- 실행 엔트리 추가:
+  - `ros2_ws/src/pipet_system_teleop/setup.py`
+  - `xbox_servo_node = pipet_system_teleop.xbox_servo_node:main`
+
+### 3) 실행 방법
+먼저 데이터 수집 백엔드/Indy driver/Mark7/카메라를 띄운다.
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch pipet_bringup data_collection.launch.py indy_ip:=192.168.1.10
+```
+
+다른 터미널에서 Xbox 텔레옵 노드를 실행한다.
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 run pipet_system_teleop xbox_servo_node
+```
+
+입력 값을 확인해야 할 때:
+
+```bash
+ros2 run pipet_system_teleop xbox_servo_node --ros-args -p debug_input:=true
+```
+
+### 4) 현재 Xbox 조작 매핑
+- `D-pad 위/아래`: Indy7 task-space X축 `+/-`
+- `D-pad 좌/우`: Indy7 task-space Y축 `+/-`
+- `LT / RT`: Z축 `-/+`
+- 오른쪽 스틱: Rx/Ry 회전
+- `LB / RB`: Rz 회전
+- `A`: Mark7 grasp
+- `B`: Mark7 open
+- `X`: Mark7 press
+- `Y`: Mark7 release
+- `START`: 녹화 시작. 녹화 중이면 종료/라벨 대기 상태로 전환
+- 녹화 종료 라벨 대기 중:
+  - `A`: success
+  - `B`: fail
+  - `X`: discard
+- `BACK`: teleop stop 및 relative target reset
+- `BACK + A`: Indy recover
+- `BACK + B`: Indy zero
+- `BACK + Y`: Indy home
+- `BACK + LB`: 이동/회전 step 감소
+- `BACK + RB`: 이동/회전 step 증가
+
+기본 step:
+- `linear_step_mm = 1.0`
+- `angular_step_deg = 1.0`
+- `BACK+LB/RB`로 `0.25` 단위 조절
+- 최대 `5.0`, 최소 `0.1`
+
+처음부터 step을 바꿔 실행할 수도 있다.
+
+```bash
+ros2 run pipet_system_teleop xbox_servo_node --ros-args \
+  -p linear_step_mm:=2.0 \
+  -p angular_step_deg:=2.0
+```
+
+### 5) 입력 backend 관련 트러블슈팅
+처음에는 `pygame.joystick` 기반으로 구현했으나, 이 환경에서는 다음 현상이 있었다.
+
+- `/usr/bin/python3` 기준 `pygame 2.1.2`, Python `3.10.12`는 정상.
+- `pygame.joystick.get_count()`가 1을 반환하고, 컨트롤러 이름도 `Xbox Series X Controller`로 보였음.
+- 하지만 `get_axis()`와 `get_button()` 값이 중립 상태에서 변하지 않는 현상이 발생.
+- `/dev/input/js0` 직접 읽기(`linuxjs`)도 초기 상태 이벤트만 보이고 실제 조작 변화가 안 보이는 시점이 있었음.
+- 컨트롤러를 뽑았다가 다시 꽂은 뒤에는 일시적으로 USB 장치 자체가 사라져 `lsusb`, `/dev/input/js0`, `/dev/input/by-id/*Microsoft*`에 보이지 않는 상태도 발생.
+- 이후 재연결 후 컨트롤러 조작이 다시 정상 동작함.
+
+결론:
+- 키보드 pygame 입력은 정상이나, Xbox는 `pygame/SDL joystick` 경로가 이 머신에서 불안정했다.
+- 현재 기본 입력 backend는 `linuxevdev`로 설정했다.
+- 즉 `/dev/input/by-id/*event-joystick` 또는 `/dev/input/event*` 계열을 직접 읽어 ROS 텔레옵 로직에 연결한다.
+
+사용 가능한 backend:
+
+```bash
+# 기본값: evdev 직접 읽기
+ros2 run pipet_system_teleop xbox_servo_node --ros-args -p input_backend:=linuxevdev
+
+# joystick 호환 장치 직접 읽기
+ros2 run pipet_system_teleop xbox_servo_node --ros-args -p input_backend:=linuxjs -p joystick_device:=/dev/input/js0
+
+# pygame joystick 강제 사용
+ros2 run pipet_system_teleop xbox_servo_node --ros-args -p input_backend:=pygame
+```
+
+### 6) 컨트롤러 인식 확인 절차
+USB 레벨 확인:
+
+```bash
+lsusb | grep -i -E 'microsoft|xbox|045e'
+```
+
+input 장치 확인:
+
+```bash
+ls /dev/input/js* /dev/input/by-id/*Microsoft* 2>/dev/null
+cat /proc/bus/input/devices | grep -A8 -i 'xbox\|microsoft'
+```
+
+정상적으로 잡히면 보통 다음이 보여야 한다.
+
+- `Microsoft Corp. Xbox Wireless Controller`
+- `/dev/input/js0`
+- `/dev/input/by-id/...event-joystick`
+- kernel driver: `xpad`
+
+현재 확인된 드라이버:
+
+```bash
+lsmod | grep -E 'xpad|joydev'
+# xpad, joydev 로드 확인
+```
+
+### 7) 컨트롤러가 갑자기 안 잡힐 때
+- USB 케이블이 충전 전용이면 인식되지 않음. 데이터 지원 케이블 필요.
+- USB 허브 대신 노트북 본체 포트에 직접 연결해본다.
+- Xbox 버튼을 길게 눌러 전원을 껐다가, 유선 연결 상태에서 다시 켠다.
+- 배터리를 빼고 유선만으로 연결해본다.
+- `lsusb`에 `Microsoft/Xbox/045e`가 없으면 ROS나 pygame 문제가 아니라 OS가 USB 장치 자체를 못 보는 상태다.
+
+### 8) 검증 상태
+- `pipet_system_teleop` 패키지 빌드 성공:
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --packages-select pipet_system_teleop
+```
+
+- 빌드 중 기존 `ai/lerobot_source/lerobot`의 Python package identification 에러 로그가 출력되지만, 선택한 `pipet_system_teleop` 빌드는 완료됨.
+- `xbox_servo_node`는 `indy_srv`가 없으면 대기한다. 따라서 `data_collection.launch.py` 또는 Indy driver가 먼저 떠 있어야 한다.
+
+---
+
+## Neuromeka IndyDCP3 Python API 정리 문서 추가
+
+관련 문서:
+- `docs/neuromeka_indydcp3_summary.md`
+
+### 1) 문서 목적
+- Neuromeka 공식 문서의 `Indy > Indy API > IndyDCP3 > Python` 내용을 프로젝트에서 자주 쓰는 관점으로 정리했다.
+- Indy7을 Python/DCP3로 직접 제어하거나, ROS driver/service 동작을 이해할 때 참고하기 위한 문서다.
+
+### 2) 핵심 내용
+- `IndyDCP3(robot_ip, index)`로 로봇 컨트롤러에 연결한다.
+- 주요 응답은 기본적으로 Python `dict` 형태로 반환된다.
+- `get_control_state()`에서 관절 위치 `q`와 TCP pose `p`를 확인할 수 있다.
+  - `q`: 관절 각도, 단위 `deg`
+  - `p`: `[x, y, z, rx, ry, rz]`, 위치 `mm`, 자세 `deg`
+- `get_motion_data()`의 `is_target_reached` 또는 `wait_for_motion_state("is_target_reached")`로 모션 완료를 확인한다.
+- 상태 확인용 주요 API:
+  - `get_robot_data()`
+  - `get_control_state()`
+  - `get_motion_data()`
+  - `get_servo_data()`
+  - `get_violation_data()`
+  - `get_program_data()`
+
+### 3) 모션/텔레옵 관련 정리
+- 기본 모션:
+  - `movej()`: 관절 공간 이동
+  - `movel()`: 작업공간 선형 이동
+  - `movec()`: 원호 이동
+  - `stop_motion()`: 모션 정지
+- 작업공간 이동의 pose는 `[x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]` 형태다.
+- 텔레오퍼레이션 API:
+  - `start_teleop(method)`
+  - `stop_teleop()`
+  - `movetelej_rel()`
+  - `movetelel_rel()`
+- 프로젝트 텔레옵 노드(`keyboard_servo_node`, `xbox_servo_node`)는 이 개념과 맞춰 relative target을 계속 업데이트하는 방식으로 동작한다.
+
+### 4) 실사용 안전 메모
+- `movej`, `movel`, `movec`는 명령 전달 즉시 실제 로봇이 움직일 수 있으므로 저속/저가속으로 먼저 확인한다.
+- 절대 좌표 이동 전에는 현재 `q`, `p`를 반드시 출력해 확인한다.
+- 텔레옵은 `try/finally` 구조로 `stop_teleop()`이 항상 호출되게 하는 것이 안전하다.
+- collision/violation 발생 시 `get_violation_data()`를 확인하고 `recover()` 또는 `move_recover_joint()` 흐름을 사용한다.
+- direct teaching은 `set_direct_teaching(enable=True/False)` API와 연결된다. 이전 history에 정리한 Indy driver `data=9/10` 처리와 같은 맥락이다.
+
+---
+
+## 데이터 수집 스키마/학습 방향 결정 문서 추가
+
+관련 문서:
+- `docs/data_collection_decisions.md`
+
+### 1) 최종 방향
+- 데이터는 NPZ episode 파일로 저장한다.
+- 라벨은 NPZ 내부 bool이 아니라 경로/파일명으로 관리한다.
+- 학습 중심은 `ee_poses` 기반 Cartesian 제어로 둔다.
+- `joint_positions`는 학습 중심은 아니지만 상태 확인, 안전 검증, replay/debug 용도로 계속 저장한다.
+- 그리퍼 명령은 event가 아니라 mode로 저장한다.
+- metadata는 유지보수용으로 저장하되, LeRobot 변환 시 학습 feature에는 넣지 않는다.
+
+저장 경로 기준:
+
+```text
+episodes/success/episode_YYYYMMDD_HHMMSS_success.npz
+episodes/fail/episode_YYYYMMDD_HHMMSS_fail.npz
+episodes/unlabeled/episode_YYYYMMDD_HHMMSS_unlabeled.npz
+```
+
+### 2) 현재 NPZ 핵심 키
+- `timestamps`: 녹화 시작 기준 상대 시간
+- `joint_positions`: Indy7 6축 관절 위치, rad
+- `joint_velocities`: 관절 속도
+- `joint_efforts`: 관절 effort/토크 계열 값
+- `ee_poses`: TCP pose `[x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]`
+- `wrist_rgb_images`: 손목 카메라 RGB
+- `overhead_rgb_images`: 오버헤드 카메라 RGB
+- `gripper_actions`: 그리퍼 mode
+- `home_joint_deg`, `camera_setup`, `joint_names`: metadata
+
+`success` 내부 키는 저장하지 않는다. `fail`과 `unlabeled`가 bool 값에서 구분되지 않는 문제를 피하기 위해 경로/파일명으로 라벨을 판정한다.
+
+### 3) 학습 feature/action 결정
+- 필수 observation:
+  - `wrist_rgb_images`
+  - `overhead_rgb_images`
+  - `ee_poses`
+- 기본 action:
+
+```text
+action = [delta_ee_pose(6), gripper_action(1)]
+delta_ee_pose = ee_poses[t+1] - ee_poses[t]
+```
+
+- `joint_positions`는 보조 상태로 쓸 수 있으나 중심 action은 `ee_pose` delta로 둔다.
+- `gripper_actions`는 아래 mode 정의를 사용한다.
+
+```text
+0 = hold
+1 = grasp
+2 = open
+3 = press
+4 = release
+```
+
+event 방식은 대부분 `0`이 되어 class imbalance가 심해질 수 있으므로 제외했다. mode 방식은 같은 명령이 여러 frame에 유지되어 학습 label을 더 조밀하게 제공한다.
+
+### 4) 저장하지만 학습 feature로 쓰지 않는 항목
+- `timestamps`: FPS, drop/jitter, replay/후처리 확인용
+- `joint_velocities`: trajectory 분석용
+- `joint_efforts`: 접촉/부하/실패 분석 후보
+- `joint_names`: column 순서 무결성 확인
+- `home_joint_deg`: home position 변경 시 유지보수용
+- `camera_setup`: wrist/overhead 구성 변경 추적용
+
+### 5) 저장하지 않기로 한 항목
+- NPZ 내부 `success`
+- `camera_info`
+- depth 이미지
+- camera extrinsics / TF
+- `schema_version`
+- `ee_twist` / TCP velocity
+- `episode_phase`
+- `robot_status`
+- `raw_commanded_action`
+
+현재 baseline은 RGB 두 대와 `ee_pose` 중심으로 먼저 성공 데모 품질을 확보하는 방향이다. depth, TF, camera extrinsics는 baseline 실패 원인이 명확해진 뒤 2차 실험으로 다시 고려한다.
+
+### 6) 현재 추천 수집 전략
+- RGB 두 대와 `ee_pose` 중심 스키마로 성공 데모를 먼저 충분히 모은다.
+- 학습은 Cartesian action(`delta_ee_pose + gripper_action`)으로 시작한다.
+- 실패/에러 episode는 저장하지 않거나 `fail`로 분리한다.
+- 데이터 종류를 무리하게 늘리기보다 깨끗한 성공 demo를 우선한다.
