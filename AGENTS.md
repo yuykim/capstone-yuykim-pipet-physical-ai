@@ -33,6 +33,8 @@ ROS2 teleop/data collection -> episode_*.npz -> LeRobotDataset -> training -> RO
 ## Working Rules
 
 - Prefer small, focused changes. Do not merge broad branch differences when only one feature is needed.
+- Record important implementation decisions, failures, fixes, and behavior changes in `docs/history.md`. This is a development log for understanding why something changed and how past problems were solved; not every tiny edit needs an entry, but non-trivial changes and debugging outcomes should be traceable there.
+- Commit by feature or coherent fix. When you make a meaningful change and the work is verified, create an appropriately named commit unless the user asks not to. If the right timing for `docs/history.md` updates or commits is unclear, ask the user before proceeding.
 - Be especially careful with `mujoco_env/`: it contains large mesh assets. Do not delete, move, or regenerate these files unless explicitly requested.
 - Do not assume `mujoco_env/` is functional. Treat it as an incomplete prototype unless the user explicitly asks to revive or debug it.
 - Be especially careful with `ai/lerobot_source/`: it is vendored/reference upstream code. Avoid editing it unless the task specifically requires a LeRobot patch.
