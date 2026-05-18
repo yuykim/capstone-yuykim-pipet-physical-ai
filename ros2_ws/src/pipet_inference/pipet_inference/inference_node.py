@@ -12,7 +12,10 @@ ROS Humble은 Python 3.10, LeRobot 0.5.x는 Python 3.12+ 이라 기본은 ZMQ �
   터미널 B:
     ros2 launch pipet_bringup inference.launch.py indy_ip:=192.168.1.10 autonomy_enabled:=true
 
-관측: /joint_states 6축 + 손목/오버헤드 RGB(+depth). 액션: delta_q(6) + gripper 0~4.
+관측: /joint_states 6축 + 손목/오버헤드 RGB(+depth).
+액션: 기본 joint 모드는 delta_q(6) + gripper 0~4.
+  control_mode=cartesian 이면 delta_ee_pose(6) + gripper 0~4 로 해석하고
+  /indy/teleop_pose 에 누적 상대 pose [x_mm,y_mm,z_mm,rx_deg,ry_deg,rz_deg]를 발행한다.
   state_target_dim=26(extended)이면 TF(world<-tcp)와 마지막 그리퍼 명령으로 observation.state를 채움
   (변환 시 --fk_urdf와 동일 URDF의 fk_urdf_path를 주면 TF 실패 시 Pinocchio FK).
 
@@ -36,6 +39,7 @@ from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image, JointState
+from std_msgs.msg import Float64MultiArray
 from std_srvs.srv import Trigger
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
@@ -43,8 +47,8 @@ import message_filters
 
 from indy_interfaces.srv import IndyService
 
-# Neuromeka indy_driver: joint_trajectory_callback은 이 모드일 때만 movetelej_abs 호출
-# (indy_define.MSG_TELE_JOINT_ABS — 포크마다 숫자가 다를 수 있어 파라미터로 덮어쓸 수 있음)
+# Neuromeka indy_driver teleop mode codes. Forks may differ, so launch params can override them.
+_DEFAULT_MSG_TELE_TASK_RLT = 5
 _DEFAULT_MSG_TELE_JOINT_ABS = 6
 
 from pipet_inference.lerobot_act_backend import (
@@ -106,13 +110,19 @@ class InferenceNode(Node):
         self.declare_parameter("device", "cuda")
         self.declare_parameter("inference_hz", 20.0)
         self.declare_parameter("sync_slop", 0.08)
+        self.declare_parameter("control_mode", "joint")
         self.declare_parameter("trajectory_topic", "/joint_trajectory_controller/joint_trajectory")
+        self.declare_parameter("cartesian_pose_topic", "/indy/teleop_pose")
         self.declare_parameter("trajectory_horizon_sec", 0.12)
         self.declare_parameter("max_delta_rad", 0.25)
         self.declare_parameter(
             "max_joint_speed_rad_s",
             0.0,
         )
+        self.declare_parameter("max_delta_mm", 2.0)
+        self.declare_parameter("max_delta_deg", 2.0)
+        self.declare_parameter("max_cartesian_speed_mm_s", 0.0)
+        self.declare_parameter("max_angular_speed_deg_s", 0.0)
         self.declare_parameter(
             "action_delta_scale",
             1.0,
@@ -163,6 +173,7 @@ class InferenceNode(Node):
         self.declare_parameter("zmq_endpoint", "tcp://127.0.0.1:5560")
         self.declare_parameter("indy_prep_joint_teleop", True)
         self.declare_parameter("indy_prep_joint_teleop_code", _DEFAULT_MSG_TELE_JOINT_ABS)
+        self.declare_parameter("indy_prep_task_teleop_code", _DEFAULT_MSG_TELE_TASK_RLT)
 
         model_path = self.get_parameter("model_path").get_parameter_value().string_value
         model_type = self.get_parameter("model_type").get_parameter_value().string_value
@@ -172,11 +183,41 @@ class InferenceNode(Node):
         device = self.get_parameter("device").get_parameter_value().string_value
         inference_hz = self.get_parameter("inference_hz").get_parameter_value().double_value
         sync_slop = self.get_parameter("sync_slop").get_parameter_value().double_value
+        control_mode = (
+            self.get_parameter("control_mode").get_parameter_value().string_value.strip().lower()
+        )
+        if control_mode in ("ee_pose", "task", "task_relative"):
+            control_mode = "cartesian"
+        if control_mode not in ("joint", "cartesian"):
+            self.get_logger().warn(
+                f"지원하지 않는 control_mode={control_mode!r}; joint 모드로 대체합니다."
+            )
+            control_mode = "joint"
+        self._control_mode = control_mode
         trajectory_topic = self.get_parameter("trajectory_topic").get_parameter_value().string_value
+        cartesian_pose_topic = self.get_parameter("cartesian_pose_topic").get_parameter_value().string_value
         traj_sec = self.get_parameter("trajectory_horizon_sec").get_parameter_value().double_value
         self._max_delta = float(self.get_parameter("max_delta_rad").get_parameter_value().double_value)
         self._max_joint_speed = float(
             self.get_parameter("max_joint_speed_rad_s").get_parameter_value().double_value
+        )
+        self._max_cart_delta_mm = float(
+            self.get_parameter("max_delta_mm").get_parameter_value().double_value
+        )
+        if self._max_cart_delta_mm <= 0.0:
+            self.get_logger().warn("max_delta_mm<=0 이므로 2.0mm로 대체합니다.")
+            self._max_cart_delta_mm = 2.0
+        self._max_cart_delta_deg = float(
+            self.get_parameter("max_delta_deg").get_parameter_value().double_value
+        )
+        if self._max_cart_delta_deg <= 0.0:
+            self.get_logger().warn("max_delta_deg<=0 이므로 2.0deg로 대체합니다.")
+            self._max_cart_delta_deg = 2.0
+        self._max_cartesian_speed = float(
+            self.get_parameter("max_cartesian_speed_mm_s").get_parameter_value().double_value
+        )
+        self._max_angular_speed = float(
+            self.get_parameter("max_angular_speed_deg_s").get_parameter_value().double_value
         )
         self._period_sec = 1.0 / max(1.0, float(inference_hz))
         self._action_delta_scale = float(
@@ -243,6 +284,7 @@ class InferenceNode(Node):
         self._grasp_confirm_count = 0
         self._grasp_delay_done = False
         self._start_q: Optional[np.ndarray] = None
+        self._relative_pose = np.zeros((6,), dtype=np.float64)
         self._gripper_disabled_warned = False
         self._grasp_elapsed_block_warn_tick = -10_000
         self._grasp_motion_block_warn_tick = -10_000
@@ -256,12 +298,21 @@ class InferenceNode(Node):
         self._tick_count = 0
         self._indy_prep_done = False
         self._indy_prep_pending = False
-        self._indy_prep_joint_teleop = bool(
+        self._indy_prep_enabled = bool(
             self.get_parameter("indy_prep_joint_teleop").get_parameter_value().bool_value
         )
-        self._indy_prep_code = int(
+        indy_joint_code = int(
             self.get_parameter("indy_prep_joint_teleop_code").get_parameter_value().integer_value
         )
+        indy_task_code = int(
+            self.get_parameter("indy_prep_task_teleop_code").get_parameter_value().integer_value
+        )
+        if self._control_mode == "cartesian":
+            self._indy_prep_code = indy_task_code
+            self._indy_prep_mode_label = "task-relative teleop"
+        else:
+            self._indy_prep_code = indy_joint_code
+            self._indy_prep_mode_label = "joint absolute teleop"
         self._indy_srv = self.create_client(IndyService, "indy_srv")
 
         if model_type != "lerobot":
@@ -397,6 +448,7 @@ class InferenceNode(Node):
         self.sync.registerCallback(self._sync_callback)
 
         self._traj_pub = self.create_publisher(JointTrajectory, trajectory_topic, qos)
+        self._cartesian_pub = self.create_publisher(Float64MultiArray, cartesian_pose_topic, qos)
         self.gripper_grasp = self.create_client(Trigger, "/gripper/grasp")
         self.gripper_open = self.create_client(Trigger, "/gripper/open")
         self.gripper_press = self.create_client(Trigger, "/gripper/press")
@@ -415,11 +467,25 @@ class InferenceNode(Node):
             f"grasp_min_motion_rad={self._grasp_min_motion_rad} | "
             f"enable_gripper={self._enable_gripper}"
         )
+        if self._control_mode == "cartesian":
+            extra += (
+                f" | max_delta_mm={self._max_cart_delta_mm} | "
+                f"max_delta_deg={self._max_cart_delta_deg} | "
+                f"max_cartesian_speed_mm_s={self._max_cartesian_speed} | "
+                f"max_angular_speed_deg_s={self._max_angular_speed}"
+            )
+            output_topic = f"cartesian_pose_topic={cartesian_pose_topic}"
+        else:
+            extra += (
+                f" | max_delta_rad={self._max_delta} | "
+                f"max_joint_speed_rad_s={self._max_joint_speed}"
+            )
+            output_topic = f"trajectory_topic={trajectory_topic}"
         if self._img_resize_hw is not None:
             extra += f" | image_resize={self._img_resize_hw[0]}x{self._img_resize_hw[1]}"
         self.get_logger().info(
             f"추론 {inference_hz}Hz | zmq={use_zmq} | autonomy_enabled={self._autonomy_enabled} | "
-            f"dry_run={self._dry_run} | trajectory_topic={trajectory_topic} | {extra}"
+            f"dry_run={self._dry_run} | control_mode={self._control_mode} | {output_topic} | {extra}"
         )
 
     def _lookup_ee_pose7(self, q: np.ndarray) -> Optional[np.ndarray]:
@@ -536,17 +602,17 @@ class InferenceNode(Node):
             self.get_logger().warn(f"액션 차원 부족: {action.shape}")
             return
 
-        raw6_base = action[:6].astype(np.float64) * self._action_delta_scale
-        gate_delta = np.clip(raw6_base, -self._max_delta, self._max_delta)
-        if self._max_joint_speed > 0.0:
-            speed_delta_limit = float(self._max_joint_speed) * float(self._period_sec)
-            gate_delta = np.clip(gate_delta, -speed_delta_limit, speed_delta_limit)
-        gate_delta_norm = float(np.linalg.norm(gate_delta))
-
         q_now = obs["observation.state"][:6].astype(np.float64)
         if self._start_q is None:
             self._start_q = q_now.copy()
         motion_from_start = float(np.linalg.norm(q_now - self._start_q))
+
+        raw6_base = action[:6].astype(np.float64) * self._action_delta_scale
+        if self._control_mode == "cartesian":
+            gate_delta = self._clip_cartesian_delta(raw6_base)
+        else:
+            gate_delta = self._clip_joint_delta(raw6_base)
+        gate_delta_norm = float(np.linalg.norm(gate_delta))
 
         g_raw = float(action[6])
         raw_g_cmd = int(np.clip(np.round(g_raw), 0, 4))
@@ -559,61 +625,111 @@ class InferenceNode(Node):
         raw6 = raw6_base
         if grasp_gate_active:
             raw6 = raw6 * self._pre_grasp_delta_scale
-        delta = np.clip(raw6, -self._max_delta, self._max_delta)
-        if self._max_joint_speed > 0.0:
-            speed_delta_limit = float(self._max_joint_speed) * float(self._period_sec)
-            delta = np.clip(delta, -speed_delta_limit, speed_delta_limit)
-
-        q_tgt = q_now + delta
+        if self._control_mode == "cartesian":
+            delta = self._clip_cartesian_delta(raw6)
+        else:
+            delta = self._clip_joint_delta(raw6)
 
         if self._tick_count % 40 == 0:
-            self.get_logger().info(
-                f"delta_norm={float(np.linalg.norm(delta)):.4f} "
-                f"motion_from_start={motion_from_start:.4f} "
-                f"(scale={self._action_delta_scale}) grip_raw={g_raw:.2f} "
-                f"raw_grip_cmd={raw_g_cmd} grip_cmd={g_cmd} "
-                f"grasp_pending={self._pending_grasp_ticks} "
-                f"grasp_confirm={self._grasp_confirm_count}/{self._grasp_confirm_steps} "
-                f"autonomy={self._autonomy_enabled}"
-            )
+            if self._control_mode == "cartesian":
+                self.get_logger().info(
+                    f"cart_delta_xyz_mm=({delta[0]:.2f},{delta[1]:.2f},{delta[2]:.2f}) "
+                    f"cart_delta_rpy_deg=({delta[3]:.2f},{delta[4]:.2f},{delta[5]:.2f}) "
+                    f"cart_delta_norm={float(np.linalg.norm(delta)):.4f} "
+                    f"motion_from_start={motion_from_start:.4f} "
+                    f"(scale={self._action_delta_scale}) grip_raw={g_raw:.2f} "
+                    f"raw_grip_cmd={raw_g_cmd} grip_cmd={g_cmd} "
+                    f"grasp_pending={self._pending_grasp_ticks} "
+                    f"grasp_confirm={self._grasp_confirm_count}/{self._grasp_confirm_steps} "
+                    f"autonomy={self._autonomy_enabled}"
+                )
+            else:
+                self.get_logger().info(
+                    f"delta_norm={float(np.linalg.norm(delta)):.4f} "
+                    f"motion_from_start={motion_from_start:.4f} "
+                    f"(scale={self._action_delta_scale}) grip_raw={g_raw:.2f} "
+                    f"raw_grip_cmd={raw_g_cmd} grip_cmd={g_cmd} "
+                    f"grasp_pending={self._pending_grasp_ticks} "
+                    f"grasp_confirm={self._grasp_confirm_count}/{self._grasp_confirm_steps} "
+                    f"autonomy={self._autonomy_enabled}"
+                )
 
         if self._dry_run or not self._autonomy_enabled:
             return
 
-        if self._indy_prep_joint_teleop and not self._indy_prep_done:
-            if self._indy_prep_pending:
-                return
-            if not self._indy_srv.wait_for_service(timeout_sec=0.0):
-                if self._tick_count % 40 == 0:
-                    self.get_logger().warn("indy_srv 대기 중 — 팔 명령은 서비스 준비 후 전송됩니다.")
-                return
-            self._indy_prep_pending = True
-            req = IndyService.Request()
-            req.data = self._indy_prep_code
-            fut = self._indy_srv.call_async(req)
-
-            def _on_prep_done(f) -> None:
-                try:
-                    r = f.result()
-                    if r.success:
-                        self._indy_prep_done = True
-                        self.get_logger().info(
-                            f"Indy 관절 텔레옵 준비 완료 (indy_srv data={self._indy_prep_code})."
-                        )
-                    else:
-                        self.get_logger().error(
-                            f"indy_srv 준비 실패: {r.message} (data={self._indy_prep_code})"
-                        )
-                except Exception as ex:
-                    self.get_logger().error(f"indy_srv 호출 예외: {ex}")
-                finally:
-                    self._indy_prep_pending = False
-
-            fut.add_done_callback(_on_prep_done)
+        if not self._prepare_indy_teleop_if_needed():
             return
 
-        self._publish_joint_targets(q_tgt)
+        if self._control_mode == "cartesian":
+            self._publish_cartesian_delta(delta)
+        else:
+            self._publish_joint_targets(q_now + delta)
         self._maybe_gripper_service(g_cmd)
+
+    def _clip_joint_delta(self, raw6: np.ndarray) -> np.ndarray:
+        delta = np.clip(np.asarray(raw6, dtype=np.float64), -self._max_delta, self._max_delta)
+        if self._max_joint_speed > 0.0:
+            speed_delta_limit = float(self._max_joint_speed) * float(self._period_sec)
+            delta = np.clip(delta, -speed_delta_limit, speed_delta_limit)
+        return delta
+
+    def _clip_cartesian_delta(self, raw6: np.ndarray) -> np.ndarray:
+        delta = np.asarray(raw6, dtype=np.float64).copy()
+        delta[:3] = np.clip(
+            delta[:3],
+            -self._max_cart_delta_mm,
+            self._max_cart_delta_mm,
+        )
+        delta[3:6] = np.clip(
+            delta[3:6],
+            -self._max_cart_delta_deg,
+            self._max_cart_delta_deg,
+        )
+        if self._max_cartesian_speed > 0.0:
+            linear_limit = float(self._max_cartesian_speed) * float(self._period_sec)
+            delta[:3] = np.clip(delta[:3], -linear_limit, linear_limit)
+        if self._max_angular_speed > 0.0:
+            angular_limit = float(self._max_angular_speed) * float(self._period_sec)
+            delta[3:6] = np.clip(delta[3:6], -angular_limit, angular_limit)
+        return delta
+
+    def _prepare_indy_teleop_if_needed(self) -> bool:
+        if not self._indy_prep_enabled or self._indy_prep_done:
+            return True
+        if self._indy_prep_pending:
+            return False
+        if not self._indy_srv.wait_for_service(timeout_sec=0.0):
+            if self._tick_count % 40 == 0:
+                self.get_logger().warn("indy_srv 대기 중 — 팔 명령은 서비스 준비 후 전송됩니다.")
+            return False
+
+        self._indy_prep_pending = True
+        req = IndyService.Request()
+        req.data = self._indy_prep_code
+        fut = self._indy_srv.call_async(req)
+
+        def _on_prep_done(f) -> None:
+            try:
+                r = f.result()
+                if r.success:
+                    self._indy_prep_done = True
+                    if self._control_mode == "cartesian":
+                        self._relative_pose[:] = 0.0
+                    self.get_logger().info(
+                        f"Indy {self._indy_prep_mode_label} 준비 완료 "
+                        f"(indy_srv data={self._indy_prep_code})."
+                    )
+                else:
+                    self.get_logger().error(
+                        f"indy_srv 준비 실패: {r.message} (data={self._indy_prep_code})"
+                    )
+            except Exception as ex:
+                self.get_logger().error(f"indy_srv 호출 예외: {ex}")
+            finally:
+                self._indy_prep_pending = False
+
+        fut.add_done_callback(_on_prep_done)
+        return False
 
     def _gate_gripper_cmd(
         self,
@@ -717,6 +833,12 @@ class InferenceNode(Node):
         pt.time_from_start = Duration(sec=ns // 1_000_000_000, nanosec=ns % 1_000_000_000)
         msg.points = [pt]
         self._traj_pub.publish(msg)
+
+    def _publish_cartesian_delta(self, delta: np.ndarray) -> None:
+        self._relative_pose = self._relative_pose + np.asarray(delta, dtype=np.float64)
+        msg = Float64MultiArray()
+        msg.data = [float(x) for x in self._relative_pose]
+        self._cartesian_pub.publish(msg)
 
     def _maybe_gripper_service(self, cmd: int) -> None:
         if cmd == self._last_grip_cmd:
