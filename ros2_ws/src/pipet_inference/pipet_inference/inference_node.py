@@ -14,7 +14,8 @@ ROS Humble은 Python 3.10, LeRobot 0.5.x는 Python 3.12+ 이라 기본은 ZMQ �
 
 관측: /joint_states 6축 + 손목/오버헤드 RGB(+depth).
 액션: 기본 joint 모드는 delta_q(6) + gripper 0~4.
-  control_mode=cartesian 이면 delta_ee_pose(6) + gripper 0~4 로 해석하고
+  control_mode=cartesian 이면 observation.state를 [q,dq,ee_pose]로 맞추고,
+  delta_ee_pose(6) + gripper 0~4 로 해석하고
   /indy/teleop_pose 에 누적 상대 pose [x_mm,y_mm,z_mm,rx_deg,ry_deg,rz_deg]를 발행한다.
   state_target_dim=26(extended)이면 TF(world<-tcp)와 마지막 그리퍼 명령으로 observation.state를 채움
   (변환 시 --fk_urdf와 동일 URDF의 fk_urdf_path를 주면 TF 실패 시 Pinocchio FK).
@@ -158,6 +159,7 @@ class InferenceNode(Node):
             "state_target_dim",
             0,
         )
+        self.declare_parameter("ee_pose_topic", "/indy/ee_pose")
         self.declare_parameter("use_tf_ee_pose", True)
         self.declare_parameter("ee_tf_parent_frame", "world")
         self.declare_parameter("ee_tf_child_frame", "tcp")
@@ -255,6 +257,7 @@ class InferenceNode(Node):
         img_th = int(self.get_parameter("image_target_height").get_parameter_value().integer_value)
         img_tw = int(self.get_parameter("image_target_width").get_parameter_value().integer_value)
         self._state_target_dim = int(self.get_parameter("state_target_dim").get_parameter_value().integer_value)
+        ee_pose_topic = self.get_parameter("ee_pose_topic").get_parameter_value().string_value
         self._img_resize_hw: Optional[tuple[int, int]] = None
         self._cv2_resize = None
         if img_th > 0 and img_tw > 0:
@@ -278,6 +281,7 @@ class InferenceNode(Node):
         self._joint_names: List[str] = []
         self._obs_lock = threading.Lock()
         self._latest_obs: Optional[dict[str, np.ndarray]] = None
+        self._latest_ee_pose6: Optional[np.ndarray] = None
         # 이산 그리퍼 모드(0~4). 피드백 없이도 학습 시 gripper_state 슬롯과 맞추기 위해 유지.
         self._last_grip_cmd: int = GRIP_HOLD
         self._pending_grasp_ticks = 0
@@ -295,6 +299,7 @@ class InferenceNode(Node):
         self._ee_tf_parent = "world"
         self._ee_tf_child = "tcp"
         self._ee_warn_last_ns = 0
+        self._ee6_warn_last_ns = 0
         self._tick_count = 0
         self._indy_prep_done = False
         self._indy_prep_pending = False
@@ -421,6 +426,7 @@ class InferenceNode(Node):
                 )
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
+        self.create_subscription(Float64MultiArray, ee_pose_topic, self._ee_pose6_cb, qos)
         self.joint_sub = message_filters.Subscriber(self, JointState, "/joint_states")
         self.wrist_rgb_sub = message_filters.Subscriber(
             self, Image, "/wrist_camera/camera/color/image_raw"
@@ -472,7 +478,8 @@ class InferenceNode(Node):
                 f" | max_delta_mm={self._max_cart_delta_mm} | "
                 f"max_delta_deg={self._max_cart_delta_deg} | "
                 f"max_cartesian_speed_mm_s={self._max_cartesian_speed} | "
-                f"max_angular_speed_deg_s={self._max_angular_speed}"
+                f"max_angular_speed_deg_s={self._max_angular_speed} | "
+                f"ee_pose_topic={ee_pose_topic}"
             )
             output_topic = f"cartesian_pose_topic={cartesian_pose_topic}"
         else:
@@ -518,6 +525,10 @@ class InferenceNode(Node):
             return img
         return self._cv2_resize.resize(img, (tw, th), interpolation=self._cv2_resize.INTER_AREA)
 
+    def _ee_pose6_cb(self, msg: Float64MultiArray) -> None:
+        if len(msg.data) >= 6:
+            self._latest_ee_pose6 = np.asarray(list(msg.data[:6]), dtype=np.float32)
+
     def _sync_callback(
         self,
         joint_msg: JointState,
@@ -548,7 +559,26 @@ class InferenceNode(Node):
         q = np.array(_joint_vec_to_six(joint_msg.position), dtype=np.float32)
         dq = np.array(_joint_vec_to_six(joint_msg.velocity), dtype=np.float32)
         tau = np.array(_joint_vec_to_six(joint_msg.effort), dtype=np.float32)
-        state_vec = np.concatenate([q, dq, tau], axis=0)
+        if self._control_mode == "cartesian":
+            ee6 = self._latest_ee_pose6
+            if ee6 is None:
+                ee6 = np.zeros((6,), dtype=np.float32)
+                now_ns = self.get_clock().now().nanoseconds
+                if now_ns - self._ee6_warn_last_ns > 3_000_000_000:
+                    self._ee6_warn_last_ns = now_ns
+                    self.get_logger().warn(
+                        "cartesian 모델 state는 [q,dq,ee_pose]를 기대하지만 /indy/ee_pose를 아직 받지 못했습니다. "
+                        "ee_pose 6D를 0으로 채웁니다."
+                    )
+            # convert.py cartesian baseline: [joint_positions(6), joint_velocities(6), ee_poses(6)] == 18D
+            state_vec = np.concatenate([q, dq, ee6.astype(np.float32)], axis=0)
+            if self._state_target_dim >= 19:
+                state_vec = np.concatenate(
+                    [state_vec, np.array([float(self._last_grip_cmd)], dtype=np.float32)],
+                    axis=0,
+                )
+        else:
+            state_vec = np.concatenate([q, dq, tau], axis=0)
         if self._state_target_dim > 0:
             cur_dim = int(state_vec.shape[0])
             if self._state_target_dim > cur_dim:
@@ -557,7 +587,7 @@ class InferenceNode(Node):
             elif self._state_target_dim < cur_dim:
                 state_vec = state_vec[: self._state_target_dim]
         # convert.py extended: 18 + ee_pose(7) + gripper_state(1) == 26
-        if self._state_target_dim >= 26 and int(state_vec.shape[0]) >= 26:
+        if self._control_mode != "cartesian" and self._state_target_dim >= 26 and int(state_vec.shape[0]) >= 26:
             ee7 = self._lookup_ee_pose7(q)
             if ee7 is not None:
                 state_vec[18:25] = ee7
@@ -570,7 +600,7 @@ class InferenceNode(Node):
                         "ee_tf_parent_frame/ee_tf_child_frame, fk_urdf_path, pinocchio 설치를 확인하세요."
                     )
             state_vec[25] = float(self._last_grip_cmd)
-        elif int(state_vec.shape[0]) > 18:
+        elif self._control_mode != "cartesian" and int(state_vec.shape[0]) > 18:
             state_vec[-1] = float(self._last_grip_cmd)
 
         obs = {

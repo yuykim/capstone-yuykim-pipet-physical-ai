@@ -183,6 +183,11 @@ def generate_launch_description():
         default_value="0",
         description="observation.state 차원 강제(0=기본 18). extended 모델(26) 추론 시 26 권장.",
     )
+    ee_pose_topic_arg = DeclareLaunchArgument(
+        "ee_pose_topic",
+        default_value="/indy/ee_pose",
+        description="cartesian state의 ee_pose 6D를 받을 Indy native pose 토픽.",
+    )
     use_tf_ee_pose_arg = DeclareLaunchArgument(
         "use_tf_ee_pose",
         default_value="true",
@@ -357,6 +362,7 @@ def generate_launch_description():
                 "state_target_dim": ParameterValue(
                     LaunchConfiguration("state_target_dim"), value_type=int
                 ),
+                "ee_pose_topic": LaunchConfiguration("ee_pose_topic"),
                 "use_tf_ee_pose": ParameterValue(LaunchConfiguration("use_tf_ee_pose"), value_type=bool),
                 "ee_tf_parent_frame": LaunchConfiguration("ee_tf_parent_frame"),
                 "ee_tf_child_frame": LaunchConfiguration("ee_tf_child_frame"),
@@ -406,6 +412,7 @@ def generate_launch_description():
             image_target_height_arg,
             image_target_width_arg,
             state_target_dim_arg,
+            ee_pose_topic_arg,
             use_tf_ee_pose_arg,
             ee_tf_parent_frame_arg,
             ee_tf_child_frame_arg,
