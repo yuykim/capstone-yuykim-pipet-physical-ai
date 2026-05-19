@@ -1864,3 +1864,10 @@ lerobot-train \
 - Pygame UI에 `control:` 줄을 추가해 현재 컨트롤러 조작 가능 상태를 명시한다: `MODEL AUTO active`, `HUMAN TAKEOVER ACTIVE`, `LABEL ONLY`, `LOCKED`, `PAUSED`.
 - TAKEOVER 중 속도 조절을 위해 왼쪽 스틱 클릭은 step 감소, 오른쪽 스틱 클릭은 step 증가로 추가했다. 기존 `BACK+LB/RB` 조합은 `BACK` emergency stop과 충돌하기 쉬워 주 조작법에서 제외했다.
 - 안전상 `BACK`은 계속 emergency stop/discard로 유지하며, 자동 재개 대신 `PAUSED`에 머무르게 했다.
+
+### 26.05.19 - DAgger-style AUTO forwarding 차단 수정
+
+- `/dagger/model_teleop_pose`에는 모델 출력이 나오는데 `/indy/teleop_pose`가 publish되지 않는 현상이 있었다.
+- 원인은 DAgger supervisor가 AUTO forwarding 전에 `indy_srv` task teleop 준비 확인을 동기 호출했고, 이 서비스 준비/응답 문제로 토픽 publish 자체가 막힐 수 있었기 때문이다.
+- inference launch가 이미 cartesian teleop 준비를 수행하므로, AUTO에서는 모델 pose를 `/indy/teleop_pose`로 바로 forwarding하도록 수정했다.
+- TAKEOVER 수동 조작은 기존처럼 실제 조작 직전에 task teleop 준비를 확인한다.

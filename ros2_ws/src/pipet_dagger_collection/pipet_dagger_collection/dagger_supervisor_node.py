@@ -324,8 +324,6 @@ class DaggerSupervisorNode(Node):
             self._publish_pose()
             return
 
-        if not self._ensure_task_teleop():
-            return
         self.relative_pose = self._model_pose_to_relative(pose)
         self.last_forwarded_model_pose = list(self.relative_pose)
         self._publish_pose()
