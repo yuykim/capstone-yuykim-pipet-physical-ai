@@ -115,6 +115,38 @@ ros2 run pipet_system_teleop xbox_servo_node --ros-args -p debug_input:=false
 
 → Xbox 패드로 Indy7 상대 텔레옵, Mark7 그리퍼, 녹화 시작/중지/라벨링을 모두 제어할 수 있다. 기본값은 2단계 수집 모드이며, remove episode는 `episodes/remove/<label>/`, insert episode는 `episodes/insert/<label>/` 아래에 저장된다.
 
+### DAgger correction 수집 (모델 rollout + 인간 개입)
+
+모델이 파이펫 근처까지 접근하지만 마지막 정렬에서 헤매는 구간을 보강할 때 사용한다. 모델이 자동으로 움직이다가 사람이 개입한 순간부터만 녹화하므로, 저장 데이터는 모델 전체 rollout이 아니라 인간 correction segment다.
+
+터미널 1 — ZMQ 모델 서버:
+
+```bash
+cd ~/2026capstone2_ws/pipet-physical-ai
+conda activate lerobot
+export PYTHONPATH="${PWD}/install/pipet_inference/lib/python3.10/site-packages:${PYTHONPATH:-}"
+
+python -m pipet_inference.zmq_act_server \
+  --bind tcp://127.0.0.1:5560 \
+  --model-path "${PWD}/ai/models/act_remove_grasp_focus_3s2s_cartesian_360_v2/checkpoints/070000"
+```
+
+터미널 2 — DAgger 수집 launch:
+
+```bash
+cd ~/2026capstone2_ws/pipet-physical-ai
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 launch pipet_dagger_collection dagger_collection.launch.py
+```
+
+저장 위치:
+
+```text
+episodes/remove_dagger/<success|fail|unlabeled>/episode_YYYYMMDD_HHMMSS_remove_dagger_<label>.npz
+```
+
 ### 카메라 노드 확인
 ```bash
 conda deactivate
@@ -213,6 +245,19 @@ ros2 run pipet_system_teleop system_teleop_node
 6. remove 성공 저장 후 UI가 insert 수집 여부를 물으면 **`A`**로 insert 모드 진입, **`B`**로 건너뛰기
 7. insert 모드에서 로봇을 임의의 시작 위치로 옮긴 뒤 **`START`** → 꽂기 녹화 시작
 8. **`START`** → **`A`(성공) / `B`(실패) / `X`(폐기)**
+
+### DAgger correction (모델 실패 상태 교정)
+
+1. 터미널 1에서 `zmq_act_server` 실행
+2. 터미널 2에서 `ros2 launch pipet_dagger_collection dagger_collection.launch.py` 실행
+3. **AUTO** 상태에서 모델이 자동 접근하는지 확인
+4. 모델이 정렬을 못 하거나 경로가 이상하면 **`START`** → 인간 개입 + 녹화 시작
+5. D-pad/LT/RT/오른쪽 스틱/LB/RB로 Indy7을 바로잡고, A/B/X/Y로 Mark7을 조작
+6. 파이펫을 잡고 뽑는 correction 구간이 끝나면 **`START`** → 라벨 입력 대기
+7. **`A`(성공) / `B`(실패) / `X`(폐기)**
+8. 안전상 문제가 보이면 언제든 **`BACK`** → teleop stop + 현재 녹화 폐기
+
+AUTO 상태에서는 모델 gripper 명령을 막아 두었으므로, 그리퍼는 사람이 개입한 뒤에만 기록한다. AUTO 상태에서 손이 닿기 전 그리퍼가 닫혀 있으면 **`B`**로 먼저 열 수 있다.
 
 ---
 
