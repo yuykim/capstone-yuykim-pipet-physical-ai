@@ -1848,3 +1848,11 @@ lerobot-train \
 - takeover 중 Xbox 조작은 기존 cartesian teleop과 같은 방식으로 동작한다: D-pad x/y, LT/RT z, right stick rx/ry, LB/RB rz, A/B/X/Y gripper.
 - 다시 `START`를 누르면 label 대기 상태가 되고, `A=success`, `B=fail`, `X=discard`로 저장/폐기한다.
 - 모델의 잘못된 action 구간은 학습 데이터로 저장하지 않고, 인간이 개입한 정렬/grasp/pull 구간만 `episodes/remove_dagger/<label>` 아래에 저장하는 것이 목적이다.
+
+### 26.05.19 - DAgger-style 수집 기본 속도 보수화
+
+- 실제 DAgger-style rollout 중 로봇이 덜덜 떨리는 현상이 있어, 수집 launch 기본값을 안전한 쪽으로 낮췄다.
+- 모델 rollout 기본 속도는 `max_cartesian_speed_mm_s=8.0`, `max_angular_speed_deg_s=8.0`에서 각각 `2.0`으로 낮췄다.
+- 모델 tick당 delta clip은 `max_delta_mm=1.0`, `max_delta_deg=1.0`에서 각각 `0.5`로 낮췄다.
+- 사람 TAKEOVER 기본 조작 step은 `linear_step_mm=1.0`, `angular_step_deg=1.0`에서 각각 `0.25`로 낮췄다.
+- joystick deadzone은 `0.18`에서 `0.22`로 올려 스틱 미세 노이즈가 명령으로 들어가는 것을 줄였다.

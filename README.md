@@ -141,6 +141,8 @@ source install/setup.bash
 ros2 launch pipet_dagger_collection dagger_collection.launch.py
 ```
 
+기본값은 수집 안전성을 우선해 보수적으로 둔다. 모델 rollout은 `max_cartesian_speed_mm_s:=2.0`, `max_angular_speed_deg_s:=2.0`이며, 사람 TAKEOVER 조작은 `linear_step_mm:=0.25`, `angular_step_deg:=0.25`다. 너무 느리면 launch 인자로 조금씩 올리고, 떨림이 보이면 즉시 `BACK` 또는 `Ctrl+C`로 멈춘다.
+
 저장 위치:
 
 ```text
