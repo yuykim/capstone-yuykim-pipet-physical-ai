@@ -328,6 +328,17 @@ class DaggerSupervisorNode(Node):
         self.last_forwarded_model_pose = list(self.relative_pose)
         self._publish_pose()
 
+    def _forward_auto_pose(self) -> None:
+        if self.mode != 'AUTO':
+            return
+        if self.awaiting_model_reset:
+            return
+        if self.last_model_pose is None:
+            return
+        self.relative_pose = self._model_pose_to_relative(self.last_model_pose)
+        self.last_forwarded_model_pose = list(self.relative_pose)
+        self._publish_pose()
+
     def _model_pose_to_relative(self, pose: list[float]) -> list[float]:
         if self.model_pose_offset is None:
             return list(pose)
@@ -871,6 +882,7 @@ class DaggerSupervisorNode(Node):
                 self._poll_input()
                 self._handle_button_edges()
                 self._update_cartesian_from_joystick()
+                self._forward_auto_pose()
                 self._debug_input()
                 self._update_screen()
                 self._remember_buttons()

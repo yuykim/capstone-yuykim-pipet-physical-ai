@@ -1871,3 +1871,9 @@ lerobot-train \
 - 원인은 DAgger supervisor가 AUTO forwarding 전에 `indy_srv` task teleop 준비 확인을 동기 호출했고, 이 서비스 준비/응답 문제로 토픽 publish 자체가 막힐 수 있었기 때문이다.
 - inference launch가 이미 cartesian teleop 준비를 수행하므로, AUTO에서는 모델 pose를 `/indy/teleop_pose`로 바로 forwarding하도록 수정했다.
 - TAKEOVER 수동 조작은 기존처럼 실제 조작 직전에 task teleop 준비를 확인한다.
+
+### 26.05.20 - DAgger-style AUTO pose republish 추가
+
+- `/indy/teleop_pose` publisher/subscriber는 생성되어 있지만 `ros2 topic echo /indy/teleop_pose --once`가 값을 받지 못하는 현상이 있었다.
+- 모델 pose callback에서만 forwarding하면 callback 타이밍/초기화 상태에 따라 실제 command 토픽이 갱신되지 않을 수 있어, AUTO 상태에서는 마지막 모델 pose를 control loop에서 계속 republish하도록 보강했다.
+- TAKEOVER 중에는 기존처럼 인간 조작 pose만 publish하고, AUTO pose republish는 비활성화된다.
