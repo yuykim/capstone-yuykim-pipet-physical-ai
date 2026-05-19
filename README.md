@@ -115,7 +115,7 @@ ros2 run pipet_system_teleop xbox_servo_node --ros-args -p debug_input:=false
 
 → Xbox 패드로 Indy7 상대 텔레옵, Mark7 그리퍼, 녹화 시작/중지/라벨링을 모두 제어할 수 있다. 기본값은 2단계 수집 모드이며, remove episode는 `episodes/remove/<label>/`, insert episode는 `episodes/insert/<label>/` 아래에 저장된다.
 
-### DAgger correction 수집 (모델 rollout + 인간 개입)
+### DAgger-style correction 수집 (모델 rollout + 인간 개입)
 
 모델이 파이펫 근처까지 접근하지만 마지막 정렬에서 헤매는 구간을 보강할 때 사용한다. 모델이 자동으로 움직이다가 사람이 개입한 순간부터만 녹화하므로, 저장 데이터는 모델 전체 rollout이 아니라 인간 correction segment다.
 
@@ -246,7 +246,7 @@ ros2 run pipet_system_teleop system_teleop_node
 7. insert 모드에서 로봇을 임의의 시작 위치로 옮긴 뒤 **`START`** → 꽂기 녹화 시작
 8. **`START`** → **`A`(성공) / `B`(실패) / `X`(폐기)**
 
-### DAgger correction (모델 실패 상태 교정)
+### DAgger-style correction (모델 실패 상태 교정)
 
 1. 터미널 1에서 `zmq_act_server` 실행
 2. 터미널 2에서 `ros2 launch pipet_dagger_collection dagger_collection.launch.py` 실행
