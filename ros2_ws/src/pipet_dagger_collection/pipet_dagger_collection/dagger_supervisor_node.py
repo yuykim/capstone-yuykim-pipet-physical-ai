@@ -18,6 +18,7 @@ from glob import glob
 import os
 import select
 import struct
+import time
 from typing import Deque, Optional
 
 os.environ.setdefault('SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS', '1')
@@ -39,14 +40,18 @@ DEFAULT_INPUT_BACKEND = 'linuxevdev'
 DEFAULT_EVENT_DEVICE = ''
 DEFAULT_JOYSTICK_DEVICE = '/dev/input/js0'
 DEFAULT_JOYSTICK_INDEX = 0
+DEFAULT_ROBOT_IP = '192.168.1.10'
+HOME_JOINT_DEG = [0.0, 25.0, -115.0, 90.0, 0.0, 0.0]
+HOME_VEL_RATIO = 10
+HOME_ACC_RATIO = 10
 
 LINEAR_STEP_MM = 1.0
 ANGULAR_STEP_DEG = 1.0
-LINEAR_STEP_DELTA_MM = 0.25
-ANGULAR_STEP_DELTA_DEG = 0.25
-MIN_LINEAR_STEP_MM = 0.1
+LINEAR_STEP_DELTA_MM = 0.1
+ANGULAR_STEP_DELTA_DEG = 0.1
+MIN_LINEAR_STEP_MM = 0.05
 MAX_LINEAR_STEP_MM = 5.0
-MIN_ANGULAR_STEP_DEG = 0.1
+MIN_ANGULAR_STEP_DEG = 0.05
 MAX_ANGULAR_STEP_DEG = 5.0
 DEADZONE = 0.18
 TRIGGER_DEADZONE = 0.08
@@ -79,6 +84,8 @@ BTN_LB = 4
 BTN_RB = 5
 BTN_BACK = 6
 BTN_START = 7
+BTN_THUMBL = 9
+BTN_THUMBR = 10
 
 JS_EVENT_BUTTON = 0x01
 JS_EVENT_AXIS = 0x02
@@ -125,6 +132,7 @@ class DaggerSupervisorNode(Node):
         self.declare_parameter('event_device', DEFAULT_EVENT_DEVICE)
         self.declare_parameter('joystick_device', DEFAULT_JOYSTICK_DEVICE)
         self.declare_parameter('joystick_index', DEFAULT_JOYSTICK_INDEX)
+        self.declare_parameter('indy_ip', DEFAULT_ROBOT_IP)
         self.declare_parameter('model_pose_topic', '/dagger/model_teleop_pose')
         self.declare_parameter('output_pose_topic', '/indy/teleop_pose')
         self.declare_parameter('ee_pose_topic', '/indy/ee_pose')
@@ -132,6 +140,11 @@ class DaggerSupervisorNode(Node):
         self.declare_parameter('linear_step_mm', LINEAR_STEP_MM)
         self.declare_parameter('angular_step_deg', ANGULAR_STEP_DEG)
         self.declare_parameter('deadzone', DEADZONE)
+        self.declare_parameter('auto_home_after_save', True)
+        self.declare_parameter('auto_resume_after_home', True)
+        self.declare_parameter('home_joint_deg', HOME_JOINT_DEG)
+        self.declare_parameter('home_vel_ratio', HOME_VEL_RATIO)
+        self.declare_parameter('home_acc_ratio', HOME_ACC_RATIO)
         self.declare_parameter('stuck_window_sec', 3.0)
         self.declare_parameter('stuck_linear_mm', 1.0)
         self.declare_parameter('stuck_angular_deg', 1.0)
@@ -142,6 +155,7 @@ class DaggerSupervisorNode(Node):
         self.event_device = self.get_parameter('event_device').value
         self.joystick_device = self.get_parameter('joystick_device').value
         self.joystick_index = int(self.get_parameter('joystick_index').value)
+        self.indy_ip = self.get_parameter('indy_ip').value
         self.model_pose_topic = self.get_parameter('model_pose_topic').value
         self.output_pose_topic = self.get_parameter('output_pose_topic').value
         self.ee_pose_topic = self.get_parameter('ee_pose_topic').value
@@ -149,6 +163,13 @@ class DaggerSupervisorNode(Node):
         self.linear_step = float(self.get_parameter('linear_step_mm').value)
         self.angular_step = float(self.get_parameter('angular_step_deg').value)
         self.deadzone = float(self.get_parameter('deadzone').value)
+        self.auto_home_after_save = bool(self.get_parameter('auto_home_after_save').value)
+        self.auto_resume_after_home = bool(self.get_parameter('auto_resume_after_home').value)
+        self.home_joint_deg = list(
+            self.get_parameter('home_joint_deg').get_parameter_value().double_array_value
+        )
+        self.home_vel_ratio = int(self.get_parameter('home_vel_ratio').value)
+        self.home_acc_ratio = int(self.get_parameter('home_acc_ratio').value)
         self.stuck_window_sec = float(self.get_parameter('stuck_window_sec').value)
         self.stuck_linear_mm = float(self.get_parameter('stuck_linear_mm').value)
         self.stuck_angular_deg = float(self.get_parameter('stuck_angular_deg').value)
@@ -186,11 +207,15 @@ class DaggerSupervisorNode(Node):
         self.teleop_ready = False
         self.relative_pose = [0.0] * 6
         self.last_model_pose: Optional[list[float]] = None
+        self.last_forwarded_model_pose: Optional[list[float]] = None
+        self.model_pose_offset: Optional[list[float]] = None
+        self.awaiting_model_reset = False
         self.last_model_msg_time: Optional[float] = None
         self.last_ee_pose: Optional[list[float]] = None
         self.ee_history: Deque[tuple[float, list[float]]] = deque()
         self.stuck_warning = False
         self.last_gripper_action = ACTION_HOLD
+        self.saved_episode_count = 0
         self.status_text = 'AUTO: model drives. START = takeover + record.'
         self._prev_buttons: dict[int, bool] = {}
         self._last_debug_state = None
@@ -268,10 +293,11 @@ class DaggerSupervisorNode(Node):
         print('  TAKEOVER:   START = stop model forwarding + start correction recording')
         print('  Move:       D-pad=x/y   LT/RT=z -/+')
         print('  Rotate:     Right stick=rx/ry   LB/RB=rz +/-')
-        print('  Speed:      BACK+LB=slower   BACK+RB=faster')
+        print('  Speed:      left stick click=slower   right stick click=faster')
         print('  Gripper:    A=grasp  B=open  X=press  Y=release')
         print('  Finish:     START, then A=success B=fail X=discard')
-        print('  Safety:     BACK=stop teleop/discard active recording')
+        print('  After save: home automatically, then AUTO resumes for next rollout')
+        print('  Safety:     BACK=stop teleop/discard active recording, stay PAUSED')
         print('=' * 76 + '\n')
 
     def _publish_task_name(self, repeat: int = 1) -> None:
@@ -288,8 +314,29 @@ class DaggerSupervisorNode(Node):
         self.last_model_msg_time = self._now_sec()
         if self.mode != 'AUTO':
             return
-        self.relative_pose = list(pose)
+
+        if self.awaiting_model_reset:
+            self.model_pose_offset = list(pose)
+            self.awaiting_model_reset = False
+            self.relative_pose = [0.0] * 6
+            self.last_forwarded_model_pose = list(self.relative_pose)
+            self.status_text = 'AUTO resumed: model output reset at home.'
+            self._publish_pose()
+            return
+
+        if not self._ensure_task_teleop():
+            return
+        self.relative_pose = self._model_pose_to_relative(pose)
+        self.last_forwarded_model_pose = list(self.relative_pose)
         self._publish_pose()
+
+    def _model_pose_to_relative(self, pose: list[float]) -> list[float]:
+        if self.model_pose_offset is None:
+            return list(pose)
+        return [
+            float(pose[i]) - float(self.model_pose_offset[i])
+            for i in range(6)
+        ]
 
     def _ee_pose_cb(self, msg: Float64MultiArray) -> None:
         if len(msg.data) < 6:
@@ -365,8 +412,10 @@ class DaggerSupervisorNode(Node):
             return
         self.mode = 'TAKEOVER'
         self.awaiting_label = False
-        if self.last_model_pose is not None:
-            self.relative_pose = list(self.last_model_pose)
+        if self.last_forwarded_model_pose is not None:
+            self.relative_pose = list(self.last_forwarded_model_pose)
+        elif self.last_model_pose is not None:
+            self.relative_pose = self._model_pose_to_relative(self.last_model_pose)
         self._publish_pose()
         self._publish_task_name(repeat=5)
         self.status_text = 'TAKEOVER recording: correct alignment, grasp, pull.'
@@ -392,6 +441,7 @@ class DaggerSupervisorNode(Node):
 
     def _finish_recording(self, label: str) -> None:
         self.awaiting_label = False
+        saved = label != 'discard'
         if label == 'discard':
             print('Discarding DAgger correction.')
             self._call_trigger(self.data_discard)
@@ -406,12 +456,77 @@ class DaggerSupervisorNode(Node):
                 print('Saving DAgger correction as FAIL.')
                 self._call_trigger(self.data_mark_fail)
             self._call_trigger(self.data_stop, timeout=300.0)
+            self.saved_episode_count += 1
 
         if self.stop_teleop_after_save:
             self._call_indy(MSG_TELE_STOP)
             self.teleop_ready = False
-        self.mode = 'PAUSED'
-        self.status_text = 'Saved/finished. Move home and relaunch for next rollout.'
+
+        if self.auto_home_after_save:
+            self._home_and_resume(label=label, saved=saved)
+        else:
+            self.mode = 'PAUSED'
+            self.status_text = 'Saved/finished. Move home and relaunch for next rollout.'
+
+    def _home_and_resume(self, label: str, saved: bool) -> None:
+        self.mode = 'HOMING'
+        self.awaiting_label = False
+        self.status_text = f'{label} handled. Moving Indy7 home...'
+        self._update_screen()
+        print(self.status_text)
+
+        if not self._move_home():
+            self.mode = 'PAUSED'
+            self.status_text = 'Home failed. Check robot, then relaunch or recover manually.'
+            print(self.status_text)
+            return
+
+        self.relative_pose = [0.0] * 6
+        self.last_forwarded_model_pose = list(self.relative_pose)
+        self.ee_history.clear()
+        self.stuck_warning = False
+        self.teleop_ready = False
+        self.awaiting_model_reset = True
+        self.mode = 'AUTO' if self.auto_resume_after_home else 'PAUSED'
+        if self.mode == 'AUTO':
+            outcome = 'saved' if saved else 'discarded'
+            self.status_text = (
+                f'{outcome}. Home reached. AUTO waiting for next model baseline.'
+            )
+        else:
+            self.status_text = 'Home reached. Auto resume disabled.'
+        print(self.status_text)
+
+    def _move_home(self) -> bool:
+        try:
+            from neuromeka import IndyDCP3
+        except ModuleNotFoundError:
+            self.get_logger().error('neuromeka package not found; cannot move home')
+            return False
+
+        print(f'Indy7: HOME -> {self.home_joint_deg} deg')
+        self._call_indy(MSG_TELE_STOP)
+        self.teleop_ready = False
+
+        try:
+            indy = IndyDCP3(robot_ip=self.indy_ip, index=0)
+            try:
+                indy.stop_motion(2)
+                time.sleep(0.3)
+            except Exception as exc:
+                self.get_logger().warn(f'Indy stop_motion before home failed: {exc}')
+            indy.movej(
+                jtarget=self.home_joint_deg,
+                vel_ratio=self.home_vel_ratio,
+                acc_ratio=self.home_acc_ratio,
+            )
+            indy.wait_for_motion_state('is_target_reached')
+        except Exception as exc:
+            self.get_logger().error(f'Failed to move Indy7 home: {exc}')
+            return False
+
+        print('Indy7: HOME reached')
+        return True
 
     def _final_gripper_warning(self) -> Optional[str]:
         if self.last_gripper_action in HOLDING_GRIPPER_ACTIONS:
@@ -466,6 +581,13 @@ class DaggerSupervisorNode(Node):
 
     def _handle_joybuttondown(self, button: int) -> None:
         back = self._button(BTN_BACK)
+
+        if button == BTN_THUMBL:
+            self._adjust_speed(-1)
+            return
+        if button == BTN_THUMBR:
+            self._adjust_speed(1)
+            return
 
         if self.awaiting_label:
             if button == BTN_A:
@@ -693,16 +815,19 @@ class DaggerSupervisorNode(Node):
         lines = [
             'Pipet DAgger Collection',
             f'mode: {self.mode}',
+            f'control: {self._control_status_text()}',
             f'task: {self.task_name}',
+            f'saved corrections: {self.saved_episode_count}',
             f'controller: {self.input_name} ({self.input_backend})',
-            f'cart step: {self.linear_step:.1f} mm / {self.angular_step:.1f} deg',
+            f'cart step: {self.linear_step:.2f} mm / {self.angular_step:.2f} deg',
             f'last gripper: {gripper_name}',
             f'model pose age: {model_age:.2f}s' if model_age is not None else 'model pose age: none',
             f'status: {self.status_text}',
             'AUTO: B=open gripper, START when model is stuck/wrong/dangerous',
             'TAKEOVER: D-pad/LT/RT/right stick/LB/RB correct, A/B/X/Y gripper',
             'Finish: START then A success / B fail / X discard',
-            'Safety: BACK stop/discard | BACK+LB/RB speed | BACK+A/B recover/zero',
+            'Speed: left stick click slower / right stick click faster',
+            'Safety: BACK stop/discard | BACK+A/B recover/zero',
         ]
         if self.stuck_warning:
             lines.append('WARNING: EE pose barely changed. Consider START takeover.')
@@ -713,6 +838,8 @@ class DaggerSupervisorNode(Node):
             color = (235, 235, 235)
             if line.startswith('mode:'):
                 color = (90, 220, 130) if self.mode == 'AUTO' else (255, 190, 90)
+            if line.startswith('control:'):
+                color = (90, 220, 130) if self.mode == 'TAKEOVER' and not self.awaiting_label else (255, 220, 120)
             if line.startswith('status:'):
                 color = (120, 190, 255)
             if line.startswith('WARNING') or line.startswith('WAITING'):
@@ -720,6 +847,21 @@ class DaggerSupervisorNode(Node):
             surf = self.font.render(line, True, color)
             self.screen.blit(surf, (24, 20 + idx * 28))
         pygame.display.flip()
+
+    def _control_status_text(self) -> str:
+        if self.mode == 'AUTO':
+            if self.awaiting_model_reset:
+                return 'AUTO locked until next model baseline'
+            return 'MODEL AUTO active; controller START takeover, B open'
+        if self.mode == 'TAKEOVER':
+            if self.awaiting_label:
+                return 'LABEL ONLY; A success, B fail, X discard'
+            return 'HUMAN TAKEOVER ACTIVE; controller drives Indy7'
+        if self.mode == 'HOMING':
+            return 'LOCKED; moving home before next rollout'
+        if self.mode == 'PAUSED':
+            return 'PAUSED; relaunch or recover manually'
+        return 'UNKNOWN'
 
     def run(self) -> None:
         try:

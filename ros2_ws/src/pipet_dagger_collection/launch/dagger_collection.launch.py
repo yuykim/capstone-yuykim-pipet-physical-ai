@@ -52,6 +52,10 @@ def generate_launch_description():
             DeclareLaunchArgument('max_delta_deg', default_value='0.5'),
             DeclareLaunchArgument('max_cartesian_speed_mm_s', default_value='2.0'),
             DeclareLaunchArgument('max_angular_speed_deg_s', default_value='2.0'),
+            DeclareLaunchArgument('auto_home_after_save', default_value='true'),
+            DeclareLaunchArgument('auto_resume_after_home', default_value='true'),
+            DeclareLaunchArgument('home_vel_ratio', default_value='10'),
+            DeclareLaunchArgument('home_acc_ratio', default_value='10'),
             DeclareLaunchArgument('debug_input', default_value='false'),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -106,6 +110,7 @@ def generate_launch_description():
                 output='screen',
                 parameters=[
                     {
+                        'indy_ip': LaunchConfiguration('indy_ip'),
                         'model_pose_topic': model_pose_topic,
                         'output_pose_topic': '/indy/teleop_pose',
                         'task_name': LaunchConfiguration('dagger_task_name'),
@@ -123,6 +128,18 @@ def generate_launch_description():
                         ),
                         'deadzone': ParameterValue(
                             LaunchConfiguration('deadzone'), value_type=float
+                        ),
+                        'auto_home_after_save': ParameterValue(
+                            LaunchConfiguration('auto_home_after_save'), value_type=bool
+                        ),
+                        'auto_resume_after_home': ParameterValue(
+                            LaunchConfiguration('auto_resume_after_home'), value_type=bool
+                        ),
+                        'home_vel_ratio': ParameterValue(
+                            LaunchConfiguration('home_vel_ratio'), value_type=int
+                        ),
+                        'home_acc_ratio': ParameterValue(
+                            LaunchConfiguration('home_acc_ratio'), value_type=int
                         ),
                         'debug_input': ParameterValue(
                             LaunchConfiguration('debug_input'), value_type=bool

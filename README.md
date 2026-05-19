@@ -141,7 +141,9 @@ source install/setup.bash
 ros2 launch pipet_dagger_collection dagger_collection.launch.py
 ```
 
-기본값은 수집 안전성을 우선해 보수적으로 둔다. 모델 rollout은 `max_cartesian_speed_mm_s:=2.0`, `max_angular_speed_deg_s:=2.0`이며, 사람 TAKEOVER 조작은 `linear_step_mm:=0.25`, `angular_step_deg:=0.25`다. 너무 느리면 launch 인자로 조금씩 올리고, 떨림이 보이면 즉시 `BACK` 또는 `Ctrl+C`로 멈춘다.
+기본값은 수집 안전성을 우선해 보수적으로 둔다. 모델 rollout은 `max_cartesian_speed_mm_s:=2.0`, `max_angular_speed_deg_s:=2.0`이며, 사람 TAKEOVER 조작은 `linear_step_mm:=0.25`, `angular_step_deg:=0.25`다. 너무 느리면 왼쪽 스틱 클릭으로 느리게, 오른쪽 스틱 클릭으로 빠르게 조절한다. 떨림이 보이면 즉시 `BACK` 또는 `Ctrl+C`로 멈춘다.
+
+DAgger 창의 `control:` 줄에서 현재 조작 상태를 확인한다. `MODEL AUTO active`면 모델이 움직이는 중이고, `HUMAN TAKEOVER ACTIVE`일 때만 컨트롤러로 Indy7을 직접 조작한다. 저장/폐기 후에는 자동으로 HOME으로 돌아가고, 첫 모델 출력을 새 기준점으로 리셋한 뒤 AUTO rollout을 다시 시작하므로 launch를 매번 재실행하지 않아도 된다.
 
 저장 위치:
 
@@ -257,7 +259,8 @@ ros2 run pipet_system_teleop system_teleop_node
 5. D-pad/LT/RT/오른쪽 스틱/LB/RB로 Indy7을 바로잡고, A/B/X/Y로 Mark7을 조작
 6. 파이펫을 잡고 뽑는 correction 구간이 끝나면 **`START`** → 라벨 입력 대기
 7. **`A`(성공) / `B`(실패) / `X`(폐기)**
-8. 안전상 문제가 보이면 언제든 **`BACK`** → teleop stop + 현재 녹화 폐기
+8. 저장/폐기 후 자동 HOME → AUTO 재개. 사람이 환경을 다시 세팅한 뒤 다음 rollout을 기다린다.
+9. 안전상 문제가 보이면 언제든 **`BACK`** → teleop stop + 현재 녹화 폐기 + PAUSED
 
 AUTO 상태에서는 모델 gripper 명령을 막아 두었으므로, 그리퍼는 사람이 개입한 뒤에만 기록한다. AUTO 상태에서 손이 닿기 전 그리퍼가 닫혀 있으면 **`B`**로 먼저 열 수 있다.
 

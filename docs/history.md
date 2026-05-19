@@ -1856,3 +1856,11 @@ lerobot-train \
 - 모델 tick당 delta clip은 `max_delta_mm=1.0`, `max_delta_deg=1.0`에서 각각 `0.5`로 낮췄다.
 - 사람 TAKEOVER 기본 조작 step은 `linear_step_mm=1.0`, `angular_step_deg=1.0`에서 각각 `0.25`로 낮췄다.
 - joystick deadzone은 `0.18`에서 `0.22`로 올려 스틱 미세 노이즈가 명령으로 들어가는 것을 줄였다.
+
+### 26.05.19 - DAgger-style 연속 수집 UX 개선
+
+- DAgger-style 수집을 매 episode마다 재실행하지 않고 계속 쓸 수 있도록, 저장/폐기 후 `HOMING` 상태로 전환해 Indy7 HOME 위치로 자동 복귀한 뒤 `AUTO` rollout을 재개하도록 수정했다.
+- inference node의 cartesian output은 누적 relative pose이므로, HOME 복귀 후 첫 모델 출력을 새 offset으로 잡아 `/indy/teleop_pose`를 다시 0 기준에서 시작하게 했다. 이 offset reset이 없으면 이전 rollout의 누적 pose가 다음 rollout에 섞여 로봇이 튈 수 있다.
+- Pygame UI에 `control:` 줄을 추가해 현재 컨트롤러 조작 가능 상태를 명시한다: `MODEL AUTO active`, `HUMAN TAKEOVER ACTIVE`, `LABEL ONLY`, `LOCKED`, `PAUSED`.
+- TAKEOVER 중 속도 조절을 위해 왼쪽 스틱 클릭은 step 감소, 오른쪽 스틱 클릭은 step 증가로 추가했다. 기존 `BACK+LB/RB` 조합은 `BACK` emergency stop과 충돌하기 쉬워 주 조작법에서 제외했다.
+- 안전상 `BACK`은 계속 emergency stop/discard로 유지하며, 자동 재개 대신 `PAUSED`에 머무르게 했다.
