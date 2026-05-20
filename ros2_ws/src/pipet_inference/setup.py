@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'inference_node = pipet_inference.inference_node:main',
+            'operator_gui = pipet_inference.operator_gui:main',
             'zmq_act_server = pipet_inference.zmq_act_server:main',
         ],
     },

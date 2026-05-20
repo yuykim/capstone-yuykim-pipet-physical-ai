@@ -54,6 +54,11 @@ def parse_args():
         help="Call stop_motion(2) before moving. Useful after teleop/inference.",
     )
     parser.add_argument(
+        "--stop-teleop",
+        action="store_true",
+        help="Call stop_teleop() before moving. Useful after Cartesian teleop/inference.",
+    )
+    parser.add_argument(
         "--no-wait",
         action="store_true",
         help="Do not wait for is_target_reached after sending movej.",
@@ -73,6 +78,11 @@ def main():
         ) from exc
 
     indy = IndyDCP3(robot_ip=args.ip, index=args.index)
+
+    if args.stop_teleop:
+        print("Stopping teleop...")
+        indy.stop_teleop()
+        time.sleep(0.5)
 
     if args.stop_before:
         print("Stopping current motion...")

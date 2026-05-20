@@ -1877,3 +1877,28 @@ lerobot-train \
 - `/indy/teleop_pose` publisher/subscriber는 생성되어 있지만 `ros2 topic echo /indy/teleop_pose --once`가 값을 받지 못하는 현상이 있었다.
 - 모델 pose callback에서만 forwarding하면 callback 타이밍/초기화 상태에 따라 실제 command 토픽이 갱신되지 않을 수 있어, AUTO 상태에서는 마지막 모델 pose를 control loop에서 계속 republish하도록 보강했다.
 - TAKEOVER 중에는 기존처럼 인간 조작 pose만 publish하고, AUTO pose republish는 비활성화된다.
+
+### 26.05.20 - Operator GUI 추가
+
+- `pipet_inference.operator_gui`와 `run_scripts/41_operator_gui.sh`를 추가했다.
+- GUI는 `/wrist_camera/camera/color/image_raw`, `/overhead_camera/camera/color/image_raw`를 표시한다.
+- 키보드 `A` 또는 Start 버튼으로 ZMQ ACT 서버와 `40_inference_ros.sh` 기반 실제 로봇 cartesian inference를 함께 시작한다.
+- 키보드 `H` 또는 Home 버튼으로 `/usr/bin/python3 control_indy7/indy7/move_home.py`를 실행해 홈 복귀를 보낸다.
+- cartesian inference 직후 홈 복귀가 모델 teleop과 충돌하지 않도록 `move_home.py`에 `--stop-teleop` 옵션을 추가했다.
+
+### 26.05.20 - 운용용 shell alias 정리
+
+- sirlab public laptop의 `~/.bashrc`에 자주 쓰는 운용 명령 alias를 추가/갱신했다.
+- `camview`: conda 환경을 비활성화한 뒤 ROS2 Humble과 `ros2_ws/install/setup.bash`를 source하고 `/wrist_camera/camera/color/image_raw`를 `rqt_image_view`로 표시한다.
+- `home`: `control_indy7/indy7/move_home.py`를 `/usr/bin/python3`로 실행해 Indy7을 프로젝트 HOME joint `[0, 25, -115, 90, 0, 0] deg`로 보낸다. 실행 전 `--stop-teleop`, `--stop-before`, `--servo-on`을 사용한다.
+- `pad_control`: ROS2 Humble과 repo root `install/setup.bash`를 source한 뒤 `pipet_system_teleop xbox_servo_node --ros-args -p debug_input:=false`를 실행한다.
+- `backend`: ROS2 Humble과 repo root `install/setup.bash`를 source하고 `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`를 설정한 뒤 `pipet_bringup data_collection.launch.py indy_ip:=192.168.1.10`을 실행한다.
+
+### 26.05.20 - act_remove_60_cartesian_360 090000 실기 실행 alias 추가
+
+- 실기 테스트 모델을 `ai/models/act_remove_60_cartesian_360/checkpoints/090000`으로 맞춰 운용 alias를 추가했다.
+- `robo_backend`: `conda activate lerobot` 후 `pipet_inference.zmq_act_server`를 `tcp://127.0.0.1:5560`에 띄운다.
+- `ai_control`: ROS2 Humble과 repo root `install/setup.bash`를 source한 뒤 `pipet_bringup inference.launch.py`를 실로봇용으로 실행한다.
+- `ai_control` 주요 설정은 `autonomy_enabled:=true`, `use_zmq_sidecar:=true`, `control_mode:=cartesian`, `state_target_dim:=18`, `image_target_height:=360`, `image_target_width:=480`이다.
+- 속도/클립은 `max_cartesian_speed_mm_s:=40.0`, `max_angular_speed_deg_s:=10.0`, `max_delta_mm:=1.0`, `max_delta_deg:=0.75`로 시작한다.
+- 같은 절차를 README의 추론 섹션에도 기록했다.

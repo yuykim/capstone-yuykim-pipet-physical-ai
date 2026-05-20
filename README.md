@@ -340,6 +340,46 @@ ros2 launch pipet_bringup inference.launch.py \
 
 추론 노드는 모델 출력을 `/indy/teleop_pose`로 발행 → Indy7이 `movetelel_abs`로 실행.
 
+### act_remove_60_cartesian_360/checkpoints/090000 실기 실행
+
+터미널 1 — LeRobot/ZMQ 모델 서버:
+
+```bash
+cd ~/2026capstone2_ws/pipet-physical-ai
+conda activate lerobot
+export PYTHONPATH="${PWD}/install/pipet_inference/lib/python3.10/site-packages:${PYTHONPATH:-}"
+
+python -m pipet_inference.zmq_act_server \
+  --bind tcp://127.0.0.1:5560 \
+  --model-path "${PWD}/ai/models/act_remove_60_cartesian_360/checkpoints/090000"
+```
+
+터미널 2 — ROS2 실로봇 inference:
+
+```bash
+cd ~/2026capstone2_ws/pipet-physical-ai
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+
+ros2 launch pipet_bringup inference.launch.py \
+  indy_ip:=192.168.1.10 \
+  mark7_port:=/dev/ttyACM0 \
+  model_path:=/home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai/ai/models/act_remove_60_cartesian_360/checkpoints/090000 \
+  autonomy_enabled:=true \
+  use_zmq_sidecar:=true \
+  zmq_endpoint:=tcp://127.0.0.1:5560 \
+  control_mode:=cartesian \
+  state_target_dim:=18 \
+  image_target_height:=360 \
+  image_target_width:=480 \
+  max_cartesian_speed_mm_s:=40.0 \
+  max_angular_speed_deg_s:=10.0 \
+  max_delta_mm:=1.0 \
+  max_delta_deg:=0.75
+```
+
+sirlab public laptop에서는 위 두 명령을 각각 `robo_backend`, `ai_control` alias로 실행할 수 있다.
+
 ---
 
 ## 8. 단독 테스트
