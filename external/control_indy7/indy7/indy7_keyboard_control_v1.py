@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import pygame
 import time
 from neuromeka import IndyDCP3, TaskTeleopType
@@ -6,6 +8,9 @@ from neuromeka import IndyDCP3, TaskTeleopType
 ROBOT_IP = "192.168.1.10" 
 STEP = 0.5        # 이동 간격 (mm 또는 degree)
 ROT_STEP = 0.5    # 회전은 이동보다 민감할 수 있어 따로 관리 가능
+HOME_JOINT_DEG = [0.00, 25.00, -115.000, 90.0, 0.00, 0.000]
+HOME_VEL_RATIO = 20
+HOME_ACC_RATIO = 100
 
 indy = IndyDCP3(ROBOT_IP)
 
@@ -24,13 +29,23 @@ def start_robot_teleop():
     print("🚀 준비 완료!")
     print("  [이동] W/S(X), A/D(Y), Q/E(Z)")
     print("  [회전] U/O(RX), I/K(RY), J/L(RZ)")
+    print("  [홈] SPACE 또는 H")
     print("  [설정] [ / ] (STEP 조절), ESC(종료)")
+
+
+def move_to_home():
+    print(f"🏠 홈 위치로 이동 중: {HOME_JOINT_DEG}")
+    indy.movej(
+        jtarget=HOME_JOINT_DEG,
+        vel_ratio=HOME_VEL_RATIO,
+        acc_ratio=HOME_ACC_RATIO,
+    )
+    indy.wait_for_motion_state("is_target_reached")
+    print("✅ 홈 위치 도착")
 
 try:
     # 초기 위치 이동
-    target_pos = [0, 35, -150, 0, 25, 0]
-    indy.movej(jtarget=target_pos)
-    time.sleep(1.0)
+    move_to_home()
 
     start_robot_teleop()
 
@@ -50,10 +65,10 @@ try:
                     STEP = STEP + 0.1
                     print(f"➕ STEP 증가: {STEP:.1f}")
                 elif event.key == pygame.K_ESCAPE: running = False
-                elif event.key == pygame.K_SPACE: # 스페이스바: 홈 이동
-                    print("🏠 홈 위치로 복귀 중...")
+                elif event.key in (pygame.K_SPACE, pygame.K_h):
                     indy.stop_teleop()
-                    indy.movej(jtarget=target_pos)
+                    move_to_home()
+                    dx = dy = dz = drx = dry = drz = 0.0
                     time.sleep(0.5)
                     indy.start_teleop(method=TaskTeleopType.RELATIVE)
         
