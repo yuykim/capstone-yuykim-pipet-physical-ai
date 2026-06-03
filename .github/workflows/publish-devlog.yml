@@ -1,0 +1,41 @@
+name: Publish Dev Diary
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "history.md"
+      - "dev_diary/**"
+      - ".devlog.yml"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check devlog config exists
+        run: test -f .devlog.yml
+
+      - name: Send repository dispatch to blog
+        env:
+          BLOG_TOKEN: ${{ secrets.BLOG_DISPATCH_TOKEN }}
+          SOURCE_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $BLOG_TOKEN" \
+            https://api.github.com/repos/yuykim/yuykim-dev-diary/dispatches \
+            -d "{
+              \"event_type\": \"devlog_updated\",
+              \"client_payload\": {
+                \"source_repo\": \"$SOURCE_REPO\",
+                \"source_sha\": \"$SOURCE_SHA\"
+              }
+            }"
