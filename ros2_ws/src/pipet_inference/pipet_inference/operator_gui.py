@@ -319,7 +319,7 @@ python -m pipet_inference.zmq_act_server \
             return
         cmd = [
             "/usr/bin/python3",
-            str(self.repo_root / "control_indy7/indy7/move_home.py"),
+            str(self.repo_root / "tools/control_indy7/indy7/move_home.py"),
             "--ip",
             self.args.indy_ip,
             "--stop-teleop",

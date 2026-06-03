@@ -20,7 +20,7 @@ GRIPPER_END_MARKER = "<!-- MARK7_REAL_END -->"
 def _resolve_mark7_source_paths() -> tuple[Path, Path]:
     candidates = [
         ROOT.parent / "ros2_ws" / "src" / "mark7" / "pipet_hand_mark7_description",
-        ROOT.parent / "external" / "pipet_gripper_Mark7" / "src" / "pipet_hand_mark7_description",
+        ROOT.parent / "vendor" / "pipet_gripper_Mark7" / "src" / "pipet_hand_mark7_description",
         ROOT.parent / "pipet_gripper_Mark7" / "src" / "pipet_hand_mark7_description",
     ]
     for base in candidates:
@@ -31,7 +31,7 @@ def _resolve_mark7_source_paths() -> tuple[Path, Path]:
     raise FileNotFoundError(
         "Could not find Mark7 description. Expected one of: "
         "ros2_ws/src/mark7/pipet_hand_mark7_description or "
-        "pipet_gripper_Mark7/src/pipet_hand_mark7_description"
+        "vendor/pipet_gripper_Mark7/src/pipet_hand_mark7_description"
     )
 
 

@@ -1902,3 +1902,33 @@ lerobot-train \
 - `ai_control` 주요 설정은 `autonomy_enabled:=true`, `use_zmq_sidecar:=true`, `control_mode:=cartesian`, `state_target_dim:=18`, `image_target_height:=360`, `image_target_width:=480`이다.
 - 속도/클립은 `max_cartesian_speed_mm_s:=40.0`, `max_angular_speed_deg_s:=10.0`, `max_delta_mm:=1.0`, `max_delta_deg:=0.75`로 시작한다.
 - 같은 절차를 README의 추론 섹션에도 기록했다.
+
+### 26.06.03 - 개인 fork 브랜치 통합
+
+- 팀 레포(SIRLab-RobotArm/pipet-physical-ai)를 개인 레포로 fork한 뒤, 분기되어 있던 `dogyung`, `movetelel`, `yuykim` 브랜치를 모두 `main`으로 통합했다.
+- `yuykim`이 이미 `movetelel`을 머지한 상태였고 `dogyung`도 main에 반영되어 있어, 충돌 없이 fast-forward로 통합되었다.
+- 통합 후 원격에서 `dogyung`, `movetelel`, `yuykim` 브랜치를 삭제하고 `main` 하나만 유지한다.
+
+### 26.06.03 - 디렉토리 구조 1차 정리
+
+- 루트가 난잡해 의도가 같은 항목끼리 묶었다.
+- `.taskmaster/`(task 관리 툴 아티팩트) 제거.
+- `control_indy7/`와 중복이던 구버전 `external/control_indy7/` 삭제, 최신 루트 버전으로 통합.
+- 빈 `ai/indy7_lerobot/` 제거.
+- `ToDokyung/` → `docs/progress/`로 의미 있는 이름으로 변경 (MuJoCo 실행/학습 진행 캡처).
+- 루트에 흩어진 `wrist_*.png` 3개를 `img/`로 이동.
+- 폴더 구조와 역할을 설명하는 `STRUCTURE.md`를 추가했다.
+
+### 26.06.03 - 디렉토리 구조 2차 리팩토링 (의도별 분리)
+
+- 1차 정리에서 `control_indy7/`를 `external/`로 옮겼던 것이 성격상 잘못된 분류였고(외부 코드가 아니라 우리가 만든 운용 툴), 동시에 `operator_gui.py`의 런타임 호출 경로(`control_indy7/indy7/move_home.py`)를 깨뜨렸음을 발견했다.
+- 의도별로 최상위 폴더를 재정의했다.
+  - `external/control_indy7/` → **`tools/control_indy7/`** (1st-party 독립 운용 툴).
+  - `external/pipet_gripper_Mark7/` → **`vendor/pipet_gripper_Mark7/`** (외부 vendored 원본). 빈 `external/`는 제거.
+- 깨졌던/바뀐 경로 참조를 함께 수정했다.
+  - `ros2_ws/.../pipet_inference/operator_gui.py`: HOME 실행 경로를 `tools/control_indy7/indy7/move_home.py`로 수정.
+  - `mujoco_env/scripts/prepare_models.py`: Mark7 description 폴백 후보 경로를 `vendor/pipet_gripper_Mark7/...`로 수정.
+  - `mujoco_env/README.md`: Mark7 xacro 출처 표기를 `vendor/pipet_gripper_Mark7`로 갱신.
+- `mujoco_env/indy7_urdf/`가 Unity 에셋 export 전체(~580파일: indy12/indyrp2/nuri*/icon* 타 로봇 모델, `.meta`, Materials, prefab, collision, `Indy7_eye_6.stl`)를 담고 있었으나, `prepare_models.py`가 실제 쓰는 `indy.urdf` + `meshes/indy7/visual/Indy7_0~6.stl`(7개)만 남기고 정리했다. 565개 파일 삭제. 동작 영향 없음(필요 시 Neuromeka 원본에서 재생성).
+- `STRUCTURE.md`를 새 구조(`tools/`, `vendor/` 포함)와 "경로 참조 주의" 표로 갱신했다.
+- **TODO(레포 밖):** sirlab public laptop의 `~/.bashrc` `home` alias가 아직 옛 경로 `control_indy7/indy7/move_home.py`를 가리키므로 `tools/control_indy7/indy7/move_home.py`로 갱신 필요.
