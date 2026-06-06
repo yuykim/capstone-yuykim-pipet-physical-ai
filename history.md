@@ -2053,3 +2053,70 @@ lerobot-train \
 - depth/nodepth 두 모델을 실기 추론(`run_scripts/40_inference_ros.sh` 또는 operator GUI)으로 평가 → 성공률 비교.
 - 성공률이 낮으면 steps 증량이 아니라 **데이터 추가 수집**으로 방향 전환.
 - (선택) No_cover 100ep까지 합쳐 데이터 증량 후 재학습.
+
+## Ubuntu 24.04/Jazzy 컨트롤러 데이터 수집 호환성 수정
+
+### 확인한 현재 환경과 실패 원인
+
+- 현재 머신은 Ubuntu 24.04.4, ROS2 Jazzy, 시스템 Python 3.12 환경이다.
+- 셸의 기본 `python3`는 Conda base의 Python 3.13을 가리키고 있었다. ROS2
+  Jazzy의 Python 패키지는 시스템 Python 3.12용이므로 빌드/실행 때 두
+  Python 환경이 섞일 수 있었다.
+- 시스템 Python에 `pygame`이 설치되어 있지 않아 `xbox_servo_node` import
+  단계에서 바로 실패하는 상태였다. `/usr/bin/python3` 사용자 영역에
+  `pygame 2.6.1`을 설치해 해결했다.
+- 현재 사용자 `sirlab`은 Linux `input` 그룹에 포함되어 있지 않았다.
+  다만 현재 데스크톱 세션의 장치 ACL로 컨트롤러를 실제 열 수 있었으므로
+  현재는 그룹 추가 없이 동작한다. 다른 세션에서 권한 오류가 날 때만
+  `input` 그룹 추가가 필요하다.
+- 제한된 진단 환경에서는 `/dev/input`이 보이지 않았지만 실제 권한으로
+  실행하자 Microsoft Controller가
+  `/dev/input/by-id/...-event-joystick`에서 자동 탐지됐다.
+- 기존 코드는 자동 탐색 실패 시 `/dev/input/event16`을 고정 반환하고,
+  stick/trigger 범위를 `-32768..32767`, `0..1023`으로 가정했다. 다른
+  컨트롤러나 새 커널 드라이버에서는 장치 번호와 축 범위가 달라질 수 있다.
+
+### 코드 수정
+
+- `run_scripts/00_env_ros.sh`
+  - Jazzy/Humble 자동 감지는 유지했다.
+  - ROS 환경에서 `/usr/bin:/bin`을 PATH 앞에 두어 Conda Python 3.13 대신
+    Jazzy와 맞는 시스템 Python 3.12가 사용되게 했다.
+  - source 후 실제 ROS 배포판과 Python 경로/버전을 출력하게 했다.
+- `pipet_system_teleop/xbox_servo_node.py`
+  - `/dev/input/by-id/*event-joystick` 기반 자동 탐색을 강화했다.
+  - 존재하지 않는 `event16`으로 진행하지 않고, 연결 확인 또는
+    `event_device` 지정 방법을 포함한 오류를 내도록 변경했다.
+  - 장치 권한 오류 시 `input` 그룹 추가와 재로그인 절차를 안내한다.
+  - Linux evdev의 `EVIOCGABS` ioctl로 실제 stick/trigger 최소/최대/flat
+    값을 읽어 정규화한다. Xbox 고정 축 범위에 덜 의존하므로 호환 패드와
+    Ubuntu 24.04 커널에서 입력 오동작 가능성을 줄였다.
+  - Ctrl+C/종료 신호에서 Jazzy가 ROS context를 먼저 종료한 경우
+    `rclpy.shutdown()`을 중복 호출하지 않게 했다.
+- `SETUP.md`
+  - Jazzy 설치 목록에 `python3-pygame`을 추가했다.
+  - Xbox 컨트롤러의 `input` 그룹 권한, 장치 확인, debug 실행 및
+    `event_device` 수동 지정 절차를 추가했다.
+
+### 설치 및 실제 장치 검증 결과
+
+```bash
+/usr/bin/python3 -m pip install --user --break-system-packages pygame
+```
+
+- `pygame 2.6.1` 설치 완료.
+- `pipet_system_teleop` Jazzy 재빌드 성공.
+- Microsoft Controller 자동 탐지 성공.
+- 커널에서 실제 축 범위를 읽음:
+  - stick: `-32768..32767`, flat `128`
+  - trigger: `0..1023`
+  - D-pad: `-1..1`
+- 노드는 컨트롤러 초기화 후 `indy_srv`를 정상적으로 기다리는 단계까지
+  실행됐다. 검증 당시 로봇 백엔드를 띄우지 않았으므로 실제 로봇 이동과
+  episode 저장은 수행하지 않았다.
+
+권한 오류가 발생하는 세션에서만 아래 작업 후 로그아웃/로그인한다.
+
+```bash
+sudo usermod -aG input "$USER"
+```

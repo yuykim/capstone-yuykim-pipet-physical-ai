@@ -10,6 +10,7 @@ This mirrors keyboard_servo_node's ROS behavior:
   - control data collection start/stop/labeling from the controller
 """
 
+import fcntl
 import os
 import select
 import struct
@@ -88,6 +89,17 @@ EV_KEY = 0x01
 EV_ABS = 0x03
 EVDEV_EVENT_FORMAT = 'llHHi'
 EVDEV_EVENT_SIZE = struct.calcsize(EVDEV_EVENT_FORMAT)
+EVDEV_ABSINFO_FORMAT = 'iiiiii'
+EVDEV_ABSINFO_SIZE = struct.calcsize(EVDEV_ABSINFO_FORMAT)
+
+IOC_NRBITS = 8
+IOC_TYPEBITS = 8
+IOC_SIZEBITS = 14
+IOC_NRSHIFT = 0
+IOC_TYPESHIFT = IOC_NRSHIFT + IOC_NRBITS
+IOC_SIZESHIFT = IOC_TYPESHIFT + IOC_TYPEBITS
+IOC_DIRSHIFT = IOC_SIZESHIFT + IOC_SIZEBITS
+IOC_READ = 2
 
 EVDEV_AXIS_TO_INDEX = {
     0: 0,    # ABS_X
@@ -113,6 +125,19 @@ EVDEV_KEY_TO_BUTTON = {
     317: 9,          # BTN_THUMBL
     318: 10,         # BTN_THUMBR
 }
+
+
+def _ior(type_code: int, number: int, size: int) -> int:
+    return (
+        (IOC_READ << IOC_DIRSHIFT)
+        | (type_code << IOC_TYPESHIFT)
+        | (number << IOC_NRSHIFT)
+        | (size << IOC_SIZESHIFT)
+    )
+
+
+def _eviocgabs(axis_code: int) -> int:
+    return _ior(ord('E'), 0x40 + axis_code, EVDEV_ABSINFO_SIZE)
 
 
 class XboxServoNode(Node):
@@ -191,6 +216,7 @@ class XboxServoNode(Node):
         self._last_debug_state = None
         self.joystick = None
         self.joystick_fd = None
+        self.evdev_axis_ranges = {}
         self.input_name = ''
         self.axes = [0.0, 0.0, -1.0, 0.0, 0.0, -1.0, 0.0, 0.0]
         self.buttons = [0] * 12
@@ -231,8 +257,9 @@ class XboxServoNode(Node):
             self._poll_input()
         elif self.input_backend == 'linuxevdev':
             self.event_device = self._resolve_event_device()
-            self.joystick_fd = os.open(self.event_device, os.O_RDONLY | os.O_NONBLOCK)
+            self.joystick_fd = self._open_input_device(self.event_device)
             self.input_name = self.event_device
+            self._load_evdev_axis_ranges()
             self.get_logger().info(f'Using Linux evdev device: {self.event_device}')
             self._poll_input()
         else:
@@ -243,18 +270,68 @@ class XboxServoNode(Node):
 
     def _resolve_event_device(self):
         if self.event_device:
+            if not os.path.exists(self.event_device):
+                raise RuntimeError(
+                    f'Configured event_device does not exist: {self.event_device}'
+                )
             return self.event_device
 
         candidates = sorted(glob('/dev/input/by-id/*event-joystick'))
         preferred = [
             path for path in candidates
-            if 'Microsoft' in path or 'Xbox' in path or 'Controller' in path
+            if any(
+                name in os.path.basename(path).lower()
+                for name in ('microsoft', 'xbox', 'controller', 'gamepad')
+            )
         ]
         if preferred:
             return preferred[0]
         if candidates:
             return candidates[0]
-        return '/dev/input/event16'
+
+        event_devices = sorted(glob('/dev/input/event*'))
+        detail = (
+            'No joystick event device found under /dev/input/by-id. '
+            'Connect the controller, then check '
+            '`ls -l /dev/input/by-id/*event-joystick`.'
+        )
+        if event_devices:
+            detail += (
+                ' Pass the controller path explicitly with '
+                '`--ros-args -p event_device:=/dev/input/eventN`.'
+            )
+        raise RuntimeError(detail)
+
+    @staticmethod
+    def _open_input_device(path: str):
+        try:
+            return os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except PermissionError as exc:
+            raise RuntimeError(
+                f'Permission denied opening {path}. Add the current user to the '
+                '`input` group (`sudo usermod -aG input $USER`), then log out and '
+                'back in before retrying.'
+            ) from exc
+        except OSError as exc:
+            raise RuntimeError(f'Failed to open controller device {path}: {exc}') from exc
+
+    def _load_evdev_axis_ranges(self):
+        for code in EVDEV_AXIS_TO_INDEX:
+            buffer = bytearray(EVDEV_ABSINFO_SIZE)
+            try:
+                fcntl.ioctl(self.joystick_fd, _eviocgabs(code), buffer, True)
+            except OSError:
+                continue
+            _, minimum, maximum, _, flat, _ = struct.unpack(
+                EVDEV_ABSINFO_FORMAT, buffer
+            )
+            if maximum > minimum:
+                self.evdev_axis_ranges[code] = (minimum, maximum, flat)
+
+        if self.evdev_axis_ranges:
+            self.get_logger().info(
+                f'Controller axis ranges: {self.evdev_axis_ranges}'
+            )
 
     def _wait_for_indy_service(self):
         self.get_logger().info('Waiting for indy_srv...')
@@ -449,11 +526,22 @@ class XboxServoNode(Node):
     def _normalize_evdev_axis(self, code: int, value: int) -> float:
         if code in (16, 17):
             return max(-1.0, min(1.0, float(value)))
-        if code in (2, 5):
-            if value < 0:
-                return max(-1.0, min(1.0, value / 32767.0))
-            return max(-1.0, min(1.0, (value / 1023.0) * 2.0 - 1.0))
-        return max(-1.0, min(1.0, value / 32767.0))
+
+        axis_range = self.evdev_axis_ranges.get(code)
+        if axis_range is None:
+            if code in (2, 5) and value >= 0:
+                minimum, maximum, flat = 0, 1023, 0
+            else:
+                minimum, maximum, flat = -32768, 32767, 0
+        else:
+            minimum, maximum, flat = axis_range
+
+        normalized = ((float(value) - minimum) / (maximum - minimum)) * 2.0 - 1.0
+        if code not in (2, 5) and flat > 0:
+            center = (minimum + maximum) * 0.5
+            if abs(value - center) <= flat:
+                normalized = 0.0
+        return max(-1.0, min(1.0, normalized))
 
     def _axis(self, index: int) -> float:
         if self.input_backend == 'pygame':
@@ -839,7 +927,7 @@ def main(args=None):
     finally:
         if node is not None:
             node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':
