@@ -183,6 +183,7 @@ def _build_features_ext(
     include_gripper_state: bool,
     include_depth: bool,
     action_space: str,
+    cameras: str = "both",
 ) -> dict[str, dict[str, Any]]:
     image_shape = (h, w, 3)  # HWC
     state_names = (
@@ -202,42 +203,48 @@ def _build_features_ext(
     else:
         action_names = [f"delta_q_{i}" for i in range(6)] + ["gripper_action"]
 
-    out: dict[str, dict[str, Any]] = {
-        "observation.images.front": {
+    use_front = cameras in ("both", "wrist_only")
+    use_overhead = cameras in ("both", "overhead_only")
+
+    out: dict[str, dict[str, Any]] = {}
+    if use_front:
+        out["observation.images.front"] = {
             "dtype": "image",
             "shape": image_shape,
             "names": ["height", "width", "channels"],
-        },
-        "observation.images.overhead": {
+        }
+    if use_overhead:
+        out["observation.images.overhead"] = {
             "dtype": "image",
             "shape": image_shape,
             "names": ["height", "width", "channels"],
-        },
-        "observation.state": {
-            "dtype": "float32",
-            "shape": (len(state_names),),
-            "names": state_names,
-        },
-        "action": {
-            "dtype": "float32",
-            "shape": (len(action_names),),
-            "names": action_names,
-        },
+        }
+    out["observation.state"] = {
+        "dtype": "float32",
+        "shape": (len(state_names),),
+        "names": state_names,
+    }
+    out["action"] = {
+        "dtype": "float32",
+        "shape": (len(action_names),),
+        "names": action_names,
     }
     if include_depth:
         # LeRobot image writer currently expects 3-channel images.
         # Keep depth as pseudo-RGB (same value repeated across channels).
         depth_shape = (h, w, 3)
-        out["observation.images.front_depth"] = {
-            "dtype": "image",
-            "shape": depth_shape,
-            "names": ["height", "width", "channels"],
-        }
-        out["observation.images.overhead_depth"] = {
-            "dtype": "image",
-            "shape": depth_shape,
-            "names": ["height", "width", "channels"],
-        }
+        if use_front:
+            out["observation.images.front_depth"] = {
+                "dtype": "image",
+                "shape": depth_shape,
+                "names": ["height", "width", "channels"],
+            }
+        if use_overhead:
+            out["observation.images.overhead_depth"] = {
+                "dtype": "image",
+                "shape": depth_shape,
+                "names": ["height", "width", "channels"],
+            }
     return out
 
 
@@ -400,6 +407,12 @@ def main() -> None:
         help="Include wrist/overhead depth as additional 1-channel image features.",
     )
     parser.add_argument(
+        "--cameras",
+        choices=["both", "overhead_only", "wrist_only"],
+        default="both",
+        help="Which cameras to include in the dataset. overhead_only: overhead RGB only. wrist_only: wrist RGB only. both: both cameras (default).",
+    )
+    parser.add_argument(
         "--log_every_frames",
         type=int,
         default=200,
@@ -494,6 +507,10 @@ def main() -> None:
             joint_names=jnames,
         )
 
+    cameras = args.cameras
+    use_front = cameras in ("both", "wrist_only")
+    use_overhead = cameras in ("both", "overhead_only")
+
     features = _build_features_ext(
         h=h,
         w=w,
@@ -501,6 +518,7 @@ def main() -> None:
         include_gripper_state=include_gripper_state,
         include_depth=bool(args.include_depth),
         action_space=args.action_space,
+        cameras=cameras,
     )
 
     output_dir = Path(args.output_dir)
@@ -537,10 +555,10 @@ def main() -> None:
 
             joint_positions = _ensure_joint_matrix_n6(ep["joint_positions"], "joint_positions")
             joint_velocities = _ensure_joint_matrix_n6(ep["joint_velocities"], "joint_velocities")
-            wrist_rgb_images = ep["wrist_rgb_images"].astype(np.uint8)
-            overhead_rgb_images = ep["overhead_rgb_images"].astype(np.uint8)
-            wrist_depth_images = ep["wrist_depth_images"] if "wrist_depth_images" in ep else None
-            overhead_depth_images = ep["overhead_depth_images"] if "overhead_depth_images" in ep else None
+            wrist_rgb_images = ep["wrist_rgb_images"].astype(np.uint8) if use_front else None
+            overhead_rgb_images = ep["overhead_rgb_images"].astype(np.uint8) if use_overhead else None
+            wrist_depth_images = (ep["wrist_depth_images"] if "wrist_depth_images" in ep else None) if use_front else None
+            overhead_depth_images = (ep["overhead_depth_images"] if "overhead_depth_images" in ep else None) if use_overhead else None
             gripper_state = (
                 np.asarray(ep["gripper_state"], dtype=np.float32).reshape(-1) if "gripper_state" in ep else None
             )
@@ -621,28 +639,26 @@ def main() -> None:
                 np.float32
             )
 
-            wrist_rgb_t = maybe_resize_rgb(wrist_rgb_images[t])
-            overhead_rgb_t = maybe_resize_rgb(overhead_rgb_images[t])
-
             # LeRobotDataset은 프레임마다 `task` 문자열을 요구한다.
             # 추후 task-conditioned 학습(다중 task) 확장 시 그대로 활용 가능.
-            frame = {
+            frame: dict[str, Any] = {
                 "task": args.task,
                 "observation.state": state_vec,
-                "observation.images.front": wrist_rgb_t,
-                "observation.images.overhead": overhead_rgb_t,
                 "action": action_vec,
             }
+            if use_front and wrist_rgb_images is not None:
+                frame["observation.images.front"] = maybe_resize_rgb(wrist_rgb_images[t])
+            if use_overhead and overhead_rgb_images is not None:
+                frame["observation.images.overhead"] = maybe_resize_rgb(overhead_rgb_images[t])
             if args.include_depth:
-                if wrist_depth_images is None or overhead_depth_images is None:
-                    raise ValueError(
-                        "--include_depth enabled but depth keys are missing in "
-                        f"{ep_path}. Required: wrist_depth_images, overhead_depth_images."
-                    )
-                wrist_depth_t = maybe_resize_rgb(_depth_u16_to_u8_rgb(wrist_depth_images[t]))
-                overhead_depth_t = maybe_resize_rgb(_depth_u16_to_u8_rgb(overhead_depth_images[t]))
-                frame["observation.images.front_depth"] = wrist_depth_t
-                frame["observation.images.overhead_depth"] = overhead_depth_t
+                if use_front:
+                    if wrist_depth_images is None:
+                        raise ValueError(f"--include_depth enabled but wrist_depth_images missing in {ep_path}.")
+                    frame["observation.images.front_depth"] = maybe_resize_rgb(_depth_u16_to_u8_rgb(wrist_depth_images[t]))
+                if use_overhead:
+                    if overhead_depth_images is None:
+                        raise ValueError(f"--include_depth enabled but overhead_depth_images missing in {ep_path}.")
+                    frame["observation.images.overhead_depth"] = maybe_resize_rgb(_depth_u16_to_u8_rgb(overhead_depth_images[t]))
             dataset.add_frame(frame)
             kept_in_episode += 1
             total_kept_frames += 1

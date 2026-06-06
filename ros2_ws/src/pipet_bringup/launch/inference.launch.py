@@ -44,7 +44,7 @@ def generate_launch_description():
 
     model_path_arg = DeclareLaunchArgument(
         "model_path",
-        default_value="/home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai/ai/models/act/checkpoints/last",
+        default_value="/home/sirlab/WORKSPACE/capstone-yuykim/capstone-yuykim-pipet-physical-ai/ai/models/act/checkpoints/last",
         description="checkpoints/last 또는 .../pretrained_model 절대 경로",
     )
     dataset_root_arg = DeclareLaunchArgument(

@@ -1932,3 +1932,124 @@ lerobot-train \
 - `mujoco_env/indy7_urdf/`가 Unity 에셋 export 전체(~580파일: indy12/indyrp2/nuri*/icon* 타 로봇 모델, `.meta`, Materials, prefab, collision, `Indy7_eye_6.stl`)를 담고 있었으나, `prepare_models.py`가 실제 쓰는 `indy.urdf` + `meshes/indy7/visual/Indy7_0~6.stl`(7개)만 남기고 정리했다. 565개 파일 삭제. 동작 영향 없음(필요 시 Neuromeka 원본에서 재생성).
 - `STRUCTURE.md`를 새 구조(`tools/`, `vendor/` 포함)와 "경로 참조 주의" 표로 갱신했다.
 - **TODO(레포 밖):** sirlab public laptop의 `~/.bashrc` `home` alias가 아직 옛 경로 `control_indy7/indy7/move_home.py`를 가리키므로 `tools/control_indy7/indy7/move_home.py`로 갱신 필요.
+
+# 26.06.06 작성자: 김유영
+
+## 워크스테이션 이전 + overhead/depth 비교 학습 (전체 기록)
+
+데이터 수집은 ROG Strix 노트북에서 했지만, 학습은 새로 들어온 고성능 워크스테이션으로 옮겨서 진행했다. 환경을 처음부터 다시 깔고, overhead 카메라 단독 + depth 유무를 비교하는 학습 파이프라인을 구성했으며, 학습 속도 병목(이미지 디코딩)을 RAM 캐시로 해결했다. 아래는 그 전 과정을 자세히 정리한 것이다.
+
+---
+
+### 1) 하드웨어가 어떻게 바뀌었나
+
+| 항목 | 이전 (ROG Strix G713RS 노트북) | 현재 (신규 워크스테이션) |
+|------|------------------------------|------------------------|
+| CPU | 모바일 Ryzen (8C 내외) | **AMD Ryzen 7 9800X3D** (8코어 / 16스레드) |
+| RAM | 32GB 내외 | **128GB** (가용 ~123GiB) |
+| GPU | 노트북 RTX 30 계열 (8~16GB) | **NVIDIA RTX PRO 6000 Blackwell** (VRAM **96GB**, sm_120) |
+| 디스크 | — | NVMe 3.6TB |
+| OS | Ubuntu 22.04 (ROS2 Humble) | **Ubuntu 24.04** (Noble) |
+
+- GPU가 8~16GB → **96GB VRAM**으로 바뀌면서 batch size를 8 → 64로 키울 여유가 생겼다.
+- RAM 128GB는 이후 "디코딩한 이미지를 통째로 RAM에 올리는" 캐시 전략의 핵심 근거가 됐다 (아래 5번).
+- GPU 정상 동작 확인: `torch 2.10.0+cu128`, compute capability `(12, 0)` Blackwell, bf16 AMP matmul 정상.
+
+### 2) 개발 환경 재구축 (Ubuntu 24.04)
+
+이전 환경(`/home/sirlab-pwd-0000/2026capstone2_ws/...`)과 경로/유저가 달라져서(`/home/sirlab/WORKSPACE/...`) 처음부터 다시 셋업했다.
+
+- **VS Code 확장**: Python/Pylance/Jupyter/ROS(ms-iot.vscode-ros)/C++(ROS 빌드용)/YAML/GitHub Actions 설치.
+- **LeRobot conda 환경** (`conda create -n lerobot python=3.12`):
+  - `torch 2.10.0+cu128`, `torchvision`, vendored `ai/lerobot_source/lerobot`(v0.5.1) `pip install -e`.
+  - `pin`(pinocchio, ee_pose FK용), `pyzmq`(추론 사이드카) 추가.
+- **ROS2**: Ubuntu 24.04라 Humble이 아니라 **Jazzy**를 설치(`ros-jazzy-desktop` + cyclonedds + ros2-control + cv-bridge 등). 시스템 Python(3.12)에 `neuromeka`, `pinocchio`(ros-jazzy-pinocchio)를 설치(PEP668 때문에 `--break-system-packages` 사용).
+- **서브모듈**: `indy7_ros2`(neuromeka-robotics/indy-ros2)가 기존 핀 커밋이 원격에서 사라져서, `humble-indyDCP3` 브랜치를 새로 클론.
+- **빌드**: `colcon build --symlink-install --packages-ignore indy_moveit indy_gazebo` (미사용 패키지 제외) → **12개 패키지 정상 빌드**. mark7 드라이버는 Jazzy API deprecation 경고만 있고 동작엔 영향 없음.
+- `run_scripts/`, `operator_gui.py`, `inference.launch.py`, `README.md`의 옛 절대경로(`sirlab-pwd-0000/2026capstone2_ws`)를 새 경로로 일괄 치환.
+
+### 3) 데이터는 어떻게 모았고, 무엇을 확인했나
+
+- 노트북에서 수집한 NPZ를 `pipet_data/`로 옮겨왔다.
+  - `20260504_pipet_up_data_No_cover/` : **100 에피소드** (피펫에 커버 없음).
+  - `260510_pipet_up_data_with_cover/SUCCESS/` : **50 에피소드** (피펫에 커버 있음).
+- NPZ 1개를 열어 구조를 확인한 결과(에피소드당 평균: No_cover ~354프레임, With_cover ~542프레임, **녹화 ~20Hz**):
+
+| 키 | shape | dtype |
+|----|-------|-------|
+| `joint_positions/velocities/efforts` | (N, 6) | float32 |
+| `wrist_rgb_images` / `overhead_rgb_images` | (N, 480, 640, 3) | uint8 |
+| `wrist_depth_images` / `overhead_depth_images` | (N, 480, 640) | **uint16** |
+| `gripper_actions` | (N,) | int8 (0=hold,1=grasp,...) |
+| `timestamps` / `success` | (N,) / () | float64 / bool |
+
+- **중요 발견**: 기존 `CLAUDE.md` 명세에는 "Depth는 수집하지 않음"이라고 돼 있었으나, **실제 NPZ 150개 전부에 wrist/overhead depth가 들어 있었다.** depth 유효 픽셀 비율은 overhead ~90%, wrist ~63~70%(로봇 팔이 FOV를 가려서 낮음).
+- 카메라 뷰 확인: **overhead = 작업대를 위에서 내려다보는 외부 카메라**(피펫 전체 장면), wrist = 손목 장착(그리퍼 근접). 이번 실험은 overhead 단독으로 진행.
+
+### 4) 학습 파이프라인을 어떻게 수정했나
+
+**(a) convert.py에 카메라 선택 옵션 추가**
+- `ai/data_conversion/npz_to_lerobot/convert.py`에 `--cameras {both, overhead_only, wrist_only}` 인자를 신설.
+- feature 빌드/프레임 루프를 조건부로 바꿔, `overhead_only`면 `observation.images.overhead`(+ depth 시 `overhead_depth`)만 데이터셋에 들어가고 wrist는 완전히 제외되게 했다.
+- `ai/lerobot/run_lerobot_train.py`에도 `--cameras` passthrough를 추가.
+
+**(b) 학습 하이퍼파라미터 (노트북 시절 → 워크스테이션)**
+
+| 파라미터 | 이전 기본 | 변경 | 이유 |
+|----------|----------|------|------|
+| batch_size | 8 | **64** | VRAM 96GB 여유 |
+| steps | 20,000 | **60,000** | cosine decay 구간과 정렬 |
+| optimizer lr | 1e-5 **constant** | **1e-4 + cosine** | batch 8→64에 맞춰 lr 상향, 스케줄러로 후반 수렴 |
+| scheduler | 없음 | **cosine_decay_with_warmup** (warmup 2000, decay 60000, peak 1e-4, decay_lr 1e-6) | 0.16 평탄 돌파 |
+| num_workers | 4 | **14** | 16스레드 활용 |
+| save_freq | 20,000 | **10,000** | 체크포인트 10개 확보 |
+| state_profile | baseline | **extended** (q6+dq6+ee_pose7+gripper1 = 20D) | ee_pose FK 포함 |
+| 해상도 | — | **360x480 유지** | 낮추면 실성능 영향 → 고정 |
+
+- **왜 lr을 올렸나**: 초기 lr 1e-5(constant)로 돌렸더니 loss가 **0.16에서 평탄**해졌다. batch를 8→64로 8배 키웠는데 lr이 그대로라 평탄 구간을 못 벗어난 것으로 판단 → lr 1e-4 + cosine으로 변경. 실제로 warmup 중인데도 loss가 0.16을 뚫고 0.37 아래로 내려가며 가설이 맞음을 확인.
+- 실행 스크립트: `run_scripts/23_*`(초기 lr 1e-5), `24_*`(lr 1e-4 + cosine), `25_train_overhead_fast.sh`(+ RAM 캐시, 최종본)로 단계적으로 정리.
+
+### 5) 학습 속도 병목(이미지 디코딩)과 해결 — RAM 사전 캐시
+
+학습이 비정상적으로 느려서(초기 추정 60k steps에 ~28시간) 원인을 정밀 진단했다.
+
+- **증상**: step이 14개마다 ~16초씩 멈춤. `nvidia-smi` GPU-Util이 대부분 0%, 가끔 94~96%로 튐(전력 78W↔300W).
+- **진단**: GPU 성능 제한 아님(600W 풀, throttle 없음, 34°C). CPU 사용률 81%, **I/O wait 0%** → 디스크 병목 아님. 데이터셋은 5.3GB로 전부 OS 페이지캐시에 상주. 즉 **CPU가 parquet 안 PNG(overhead RGB + depth 2스트림)를 매 step 디코딩하느라 GPU를 굶기는** 구조. 9800X3D는 8코어라 디코딩 병렬 처리량에 물리적 상한.
+- **1차 패치(`lerobot_train.py` DataLoader)**: `persistent_workers=True` + `prefetch_factor`를 환경변수(`LEROBOT_PREFETCH_FACTOR`)로 조절 → 정지 16초 → 5~7초로 일부 완화. 다만 "생산(CPU 디코딩) < 소비(GPU)" 구조라 버퍼만 키워선 근본 해결 안 됨.
+- **2차 패치(핵심): RAM 사전 디코딩 캐시** (`_RamCachedDataset`, `LEROBOT_RAM_CACHE=1`).
+  - 학습 시작 전 전체 프레임을 **1회만 디코딩**해 **uint8(C,H,W)로 RAM에 적재**(augmentation이 꺼져 있어 픽셀이 매번 동일 → round-trip 손실 없음 → 실성능 영향 0).
+  - 이후 매 step은 RAM에서 꺼내 `float/255`로 복원해 반환 → **디코딩 0**.
+  - 워커는 fork copy-on-write로 numpy를 공유하므로 메모리는 1벌(overhead RGB+depth 2스트림 = **26.2GB**, RAM 128GB라 여유).
+  - 사전 디코딩 자체도 단일 프로세스(처음엔 ~60분 추정)에서 **14워커 병렬 DataLoader**로 바꿔 ~10분으로 단축. 워커→메인 텐서 전달 시 fd 고갈(`received 0 items of ancdata`) → `torch.multiprocessing.set_sharing_strategy("file_system")` + 기본 collate(배치 단위 적재)로 해결. 래퍼가 원본 dataset 속성(`num_frames`, `meta` 등)을 못 찾는 문제는 `__getattr__` 위임으로 해결.
+- **효과**: step당 **1.7초 → 0.18초(약 9~10배)**. 60k steps 예상 시간 **28시간 → 3시간 안팎**.
+
+### 6) 그래서 어떤 결과가 나왔나 — depth vs nodepth 비교
+
+동일 데이터(with_cover 50ep, overhead 단독, 360x480, state 20D)와 **동일 학습 설정**(lr 1e-4 + cosine, batch 64, 60k steps)에서 **depth 포함 여부만** 다르게 두 모델을 학습했다.
+
+| | **depth 포함** (`act_overhead_depth_cosine`) | **depth 제외** (`act_overhead_nodepth_cosine`) |
+|--|------|------|
+| 이미지 스트림 | overhead RGB + overhead depth | overhead RGB only |
+| 최종 loss (60k) | **0.137** | **0.136** |
+| 학습 속도 | 5.7 step/s (0.18s/step) | **12.5 step/s** (1스트림이라 2배 빠름) |
+| 총 학습 시간 | 3시간 02분 | 1시간 25분 |
+| 캐시 RAM | 26.2GB | 13.1GB |
+
+**loss 곡선(10k 구간 평균)** — 두 모델이 거의 동일하게 수렴:
+
+| 구간 | depth | nodepth |
+|------|-------|---------|
+| ~10K | 0.165 | 0.163 |
+| ~30K | 0.143 | 0.143 |
+| ~50K | 0.137 | 0.137 |
+| **~60K** | **0.137** | **0.137** |
+
+- **50K → 60K 구간에서 loss 변화 0** → 완전 수렴. cosine으로 lr이 1e-6까지 내려간 상태라, **같은 설정으로 steps만 더 늘려도 loss는 더 안 내려간다**(곡선이 증명). 추가 하락을 원하면 데이터 증량(50→150ep)이 근본 해결.
+- **train loss 기준으로는 depth 이득이 사실상 없음(0.137 vs 0.136)**. overhead가 작업대를 위에서 보는 뷰라 RGB만으로 피펫/그리퍼 위치가 충분히 보였던 것으로 해석.
+- 단 **loss ≠ 실기 성공률**. depth의 거리 정보가 그리퍼 접근 안정성에 도움될 수도, depth 노이즈(wrist 유효픽셀 63%)가 방해될 수도 있어 **실기 평가가 다음 필수 단계**. 각 모델 체크포인트(10k 단위)를 실제 로봇에서 같은 조건으로 돌려 성공률을 비교해야 depth 효과를 판별할 수 있다.
+
+### 7) 다음 할 일
+
+- depth/nodepth 두 모델을 실기 추론(`run_scripts/40_inference_ros.sh` 또는 operator GUI)으로 평가 → 성공률 비교.
+- 성공률이 낮으면 steps 증량이 아니라 **데이터 추가 수집**으로 방향 전환.
+- (선택) No_cover 100ep까지 합쳐 데이터 증량 후 재학습.
