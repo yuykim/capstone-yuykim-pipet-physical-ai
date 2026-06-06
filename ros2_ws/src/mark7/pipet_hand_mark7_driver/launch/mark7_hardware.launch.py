@@ -58,7 +58,10 @@ def generate_launch_description():
         name="mark7_robot_state_publisher",
         output="screen",
         parameters=[robot_description],
-        remappings=[("joint_states", "/mark7/joint_states")],
+        remappings=[
+            ("joint_states", "/mark7/joint_states"),
+            ("robot_description", "/mark7/robot_description"),
+        ],
     )
 
     # controller_manager — 하드웨어 플러그인 로드 + 컨트롤러 관리 (/mark7 네임스페이스)

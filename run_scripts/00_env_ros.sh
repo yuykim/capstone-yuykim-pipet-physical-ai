@@ -21,8 +21,9 @@ else
 fi
 
 # Jazzy packages use Ubuntu's Python 3.12. Keep an active Conda base
-# environment from redirecting ROS and colcon to a different Python.
-export PATH="/usr/bin:/bin:${PATH}"
+# environment from redirecting ROS and colcon to a different Python. Include
+# user-installed ROS utilities such as xacro before the system paths.
+export PATH="${HOME}/.local/bin:/usr/bin:/bin:${PATH}"
 
 if [[ -f "${REPO_ROOT}/ros2_ws/install/setup.bash" ]]; then
   source "${REPO_ROOT}/ros2_ws/install/setup.bash"

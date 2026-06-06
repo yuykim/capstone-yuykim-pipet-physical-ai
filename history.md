@@ -2120,3 +2120,47 @@ lerobot-train \
 ```bash
 sudo usermod -aG input "$USER"
 ```
+
+### 데이터 수집 launch 즉시 종료 추가 수정
+
+- `ros2 launch pipet_bringup data_collection.launch.py` 실행 직후 터미널/창이
+  사라지는 현상을 ROS 로그에서 확인했다.
+- 직접 원인은 Ubuntu 24.04/Jazzy 환경에 `xacro` 실행 파일이 없어서 Indy7과
+  Mark7의 URDF 생성이 시작되지 못한 것이었다. launch 로그에는
+  `executable '[TextSubstitution ...]' not found on the PATH`로 기록됐다.
+- 시스템 Python 사용자 영역에 `xacro 2.1.1`을 설치했다.
+
+```bash
+/usr/bin/python3 -m pip install --user --break-system-packages xacro
+```
+
+- pip 사용자 실행 파일은 `~/.local/bin/xacro`에 설치되므로,
+  `run_scripts/00_env_ros.sh`가 `~/.local/bin`을 PATH 앞에 포함하도록
+  수정했다.
+- Mark7 장치 `/dev/ttyACM0`은 `root:dialout`, mode `0660`인데 현재 사용자는
+  `dialout` 그룹이 아니다. launch 문법 문제 해결 후 실제 Mark7 활성화에는
+  아래 1회 설정과 로그아웃/로그인이 필요하다.
+
+```bash
+sudo usermod -aG dialout "$USER"
+```
+
+- xacro 설치 후 mock Mark7으로 launch를 재현하자 Jazzy의
+  `controller_manager`가 `/mark7/robot_description`을 기다리는 상태가
+  확인됐다. 처음에는 controller 구독을 `/robot_description`으로 remap했지만,
+  이 토픽에는 Indy7과 Mark7의 두 `robot_state_publisher`가 함께 발행해
+  Mark7 controller가 Indy7 URDF를 먼저 받는 경쟁 상태가 발생했다.
+  최종적으로 Mark7 publisher의 `robot_description`만
+  `/mark7/robot_description`으로 remap하고 controller는 원래 namespace
+  토픽을 구독하도록 분리했다.
+- 현재 연결된 RealSense는 serial `317222074298` 오버헤드 카메라 한 대다.
+  손목 카메라 `844212071939`는 연결되어 있지 않으므로 현재 환경에서는
+  `camera_setup:=overhead_rgb`로 실행해야 수집 동기화가 진행된다.
+- 최종 검증:
+  - mock Mark7 + 오버헤드 카메라 구성에서 Indy7 드라이버, Mark7 hardware,
+    `joint_state_broadcaster`, `forward_position_controller`, RealSense,
+    data collector가 모두 정상 기동했다.
+  - 오버헤드 RGB 토픽은 약 30Hz로 수신됐다.
+  - 실제 Mark7 모드에서는 올바른 Mark7 URDF와 hardware plugin을 로드한 뒤
+    `/dev/ttyACM0` open 단계에서만 실패했다. 코드 문제가 아니라 현재 사용자
+    세션에 `dialout` 그룹 권한이 없는 것이 남은 원인이다.
