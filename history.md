@@ -2164,3 +2164,26 @@ sudo usermod -aG dialout "$USER"
   - 실제 Mark7 모드에서는 올바른 Mark7 URDF와 hardware plugin을 로드한 뒤
     `/dev/ttyACM0` open 단계에서만 실패했다. 코드 문제가 아니라 현재 사용자
     세션에 `dialout` 그룹 권한이 없는 것이 남은 원인이다.
+
+### ros2_control_node crash 팝업 원인과 대응
+
+- Ubuntu crash reporter가 `ros2_control_node has stopped unexpectedly` 팝업을
+  표시했고 crash dump의 signal은 `6`(`SIGABRT`)이었다.
+- `getent group dialout`에는 `sirlab`이 추가되어 있었지만 현재 로그인
+  세션의 `id`에는 아직 `dialout`이 없었다. 그룹 변경은 기존 터미널에
+  소급 적용되지 않으므로 `/dev/ttyACM0` open은 계속 `Permission denied`였다.
+- 현재 세션에서 `sg dialout`으로 실행하자 실제 Mark7 포트 open, Reset 송신,
+  `joint_state_broadcaster`, `forward_position_controller` 활성화까지 성공했다.
+- Jazzy controller manager는 hardware `on_activate()`가 ERROR를 반환하면
+  runtime error를 던지고 abort하기 때문에 OS crash 팝업까지 이어진다.
+  Mark7 launch에 serial port 존재/읽기/쓰기 권한 사전 검사를 추가해,
+  앞으로는 controller manager를 띄우기 전에 해결 명령이 포함된 launch
+  오류로 중단되게 했다.
+- `run_scripts/00_env_ros.sh`도 `/dev/ttyACM0`이 현재 세션에서 접근 불가능하면
+  로그아웃/로그인 또는 `sg dialout` 사용을 경고한다.
+- 사전 검사 검증:
+  - 일반 세션에서는 `ros2_control_node`를 시작하지 않고
+    `Mark7 serial port permission denied` launch 오류로 종료돼 crash 팝업이
+    발생하지 않았다.
+  - `sg dialout` 세션에서는 실제 Mark7 포트 open, Reset, Rx packet 수신,
+    두 controller 활성화가 모두 성공했다.

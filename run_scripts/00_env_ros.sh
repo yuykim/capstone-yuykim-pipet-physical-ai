@@ -38,3 +38,8 @@ echo "[env] ROS_DISTRO=${ROS_DISTRO}"
 echo "[env] python3=$(command -v python3) ($(python3 --version 2>&1))"
 echo "[env] REPO_ROOT=${REPO_ROOT}"
 echo "[env] RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION}"
+
+if [[ -e /dev/ttyACM0 && ! -r /dev/ttyACM0 ]]; then
+  echo "[env] WARNING: /dev/ttyACM0 is not accessible in this login session." >&2
+  echo "[env] Log out/in after joining dialout, or launch with: sg dialout -c '<command>'" >&2
+fi

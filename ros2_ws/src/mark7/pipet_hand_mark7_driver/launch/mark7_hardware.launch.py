@@ -1,11 +1,32 @@
+import os
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+
+def validate_serial_access(context):
+    if LaunchConfiguration("use_mock_hardware").perform(context).lower() == "true":
+        return []
+
+    port = LaunchConfiguration("port").perform(context)
+    if not os.path.exists(port):
+        raise RuntimeError(
+            f"Mark7 serial port does not exist: {port}. "
+            "Connect the Mark7 dongle or set mark7_port:=<device>."
+        )
+    if not os.access(port, os.R_OK | os.W_OK):
+        raise RuntimeError(
+            f"Mark7 serial port permission denied: {port}. "
+            "Run `sudo usermod -aG dialout $USER`, then log out and back in. "
+            "For the current stale session, run the launch through `sg dialout -c`."
+        )
+    return []
 
 
 def generate_launch_description():
@@ -115,6 +136,7 @@ def generate_launch_description():
         declare_use_mock,
         declare_port,
         declare_use_rviz,
+        OpaqueFunction(function=validate_serial_access),
         robot_state_publisher,
         controller_manager,
         joint_state_broadcaster_spawner,
