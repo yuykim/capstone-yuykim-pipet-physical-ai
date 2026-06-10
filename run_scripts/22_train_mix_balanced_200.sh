@@ -12,7 +12,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 cd "${REPO_ROOT}"
 
-source /home/sirlab-pwd-0000/miniconda3/etc/profile.d/conda.sh
+source /home/sirlab/miniconda3/etc/profile.d/conda.sh
 conda activate lerobot
 
 set -o pipefail
@@ -42,7 +42,7 @@ import shutil
 
 import numpy as np
 
-root = Path("/home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai")
+root = Path("/home/sirlab/WORKSPACE/capstone-yuykim/capstone-yuykim-pipet-physical-ai")
 
 no_cover_orig = root / "ros2_ws/episodes/success/260503_half_data_100"
 no_cover_focus = root / "ros2_ws/episodes/success/260503_half_data_100_grasp_focus"

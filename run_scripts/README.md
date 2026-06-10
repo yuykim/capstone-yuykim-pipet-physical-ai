@@ -3,7 +3,7 @@
 레포 루트에서 자주 쓰는 실행 명령을 모아둔 폴더입니다.
 
 ```bash
-cd /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai
+cd /home/sirlab/WORKSPACE/capstone-yuykim/capstone-yuykim-pipet-physical-ai
 ```
 
 ## 공통 규칙
@@ -13,7 +13,7 @@ cd /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai
 - AI/LeRobot 학습은 먼저 conda 환경을 켜야 합니다.
 
 ```bash
-source /home/sirlab-pwd-0000/miniconda3/etc/profile.d/conda.sh
+source /home/sirlab/miniconda3/etc/profile.d/conda.sh
 conda activate lerobot
 
 export PYTHONPATH="${PWD}/ai/lerobot_source/lerobot/src:${PYTHONPATH:-}"
@@ -181,10 +181,10 @@ extended 26D 모델 기본 예시:
 
 ```bash
 ./run_scripts/40_inference_ros.sh \
-  /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai/ai/models/act_pipet_extended_depth_100_grasp_focus/checkpoints/last \
+  /home/sirlab/WORKSPACE/capstone-yuykim/capstone-yuykim-pipet-physical-ai/ai/models/act_pipet_extended_depth_100_grasp_focus/checkpoints/last \
   192.168.1.10 \
   /dev/ttyACM0 \
-  /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai/mujoco_env/generated/indy7_mujoco.urdf \
+  /home/sirlab/WORKSPACE/capstone-yuykim/capstone-yuykim-pipet-physical-ai/mujoco_env/generated/indy7_mujoco.urdf \
   26
 ```
 
@@ -335,30 +335,30 @@ LeRobot은 conda Python, ROS2는 system Python을 쓰므로 ACT 모델 추론은
 터미널 A: ZMQ ACT server
 
 ```bash
-cd /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai/ros2_ws
+cd /home/sirlab/WORKSPACE/capstone-yuykim/capstone-yuykim-pipet-physical-ai/ros2_ws
 
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-source /home/sirlab-pwd-0000/miniconda3/etc/profile.d/conda.sh
+source /home/sirlab/miniconda3/etc/profile.d/conda.sh
 conda activate lerobot
 
-export PYTHONPATH="/home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai/ai/lerobot_source/lerobot/src:${PWD}/install/pipet_inference/lib/python3.10/site-packages:${PYTHONPATH:-}"
+export PYTHONPATH="/home/sirlab/WORKSPACE/capstone-yuykim/capstone-yuykim-pipet-physical-ai/ai/lerobot_source/lerobot/src:${PWD}/install/pipet_inference/lib/python3.10/site-packages:${PYTHONPATH:-}"
 
 python -m pipet_inference.zmq_act_server \
   --bind tcp://127.0.0.1:5560 \
-  --model-path /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai/ai/models/act_pipet_extended_depth_100_grasp_focus/checkpoints/last
+  --model-path /home/sirlab/WORKSPACE/capstone-yuykim/capstone-yuykim-pipet-physical-ai/ai/models/act_pipet_extended_depth_100_grasp_focus/checkpoints/last
 ```
 
 터미널 B: ROS inference
 
 ```bash
-cd /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai
+cd /home/sirlab/WORKSPACE/capstone-yuykim/capstone-yuykim-pipet-physical-ai
 
 ./run_scripts/40_inference_ros.sh \
-  /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai/ai/models/act_pipet_extended_depth_100_grasp_focus/checkpoints/last \
+  /home/sirlab/WORKSPACE/capstone-yuykim/capstone-yuykim-pipet-physical-ai/ai/models/act_pipet_extended_depth_100_grasp_focus/checkpoints/last \
   192.168.1.10 \
   /dev/ttyACM0 \
-  /home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai/mujoco_env/generated/indy7_mujoco.urdf \
+  /home/sirlab/WORKSPACE/capstone-yuykim/capstone-yuykim-pipet-physical-ai/mujoco_env/generated/indy7_mujoco.urdf \
   26 \
   autonomy_enabled:=true \
   use_zmq_sidecar:=true \

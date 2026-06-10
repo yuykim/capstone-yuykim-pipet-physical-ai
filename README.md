@@ -364,7 +364,7 @@ source install/setup.bash
 ros2 launch pipet_bringup inference.launch.py \
   indy_ip:=192.168.1.10 \
   mark7_port:=/dev/ttyACM0 \
-  model_path:=/home/sirlab-pwd-0000/2026capstone2_ws/pipet-physical-ai/ai/models/act_remove_60_cartesian_360/checkpoints/090000 \
+  model_path:=/home/sirlab/WORKSPACE/capstone-yuykim/capstone-yuykim-pipet-physical-ai/ai/models/act_remove_60_cartesian_360/checkpoints/090000 \
   autonomy_enabled:=true \
   use_zmq_sidecar:=true \
   zmq_endpoint:=tcp://127.0.0.1:5560 \

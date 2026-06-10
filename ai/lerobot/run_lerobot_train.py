@@ -188,6 +188,12 @@ def main() -> None:
         help="Include depth observations during conversion as additional image features.",
     )
     parser.add_argument(
+        "--cameras",
+        choices=["both", "overhead_only", "wrist_only"],
+        default="both",
+        help="Which cameras to include in the dataset (overhead_only/wrist_only/both).",
+    )
+    parser.add_argument(
         "--fk_urdf",
         default="",
         help="Indy7 URDF for extended ee_pose FK when NPZ has no ee_pose (same file as inference fk_urdf_path 권장).",
@@ -257,6 +263,7 @@ def main() -> None:
         cmd_convert += ["--state_profile", args.state_profile]
         if args.include_depth:
             cmd_convert.append("--include_depth")
+        cmd_convert += ["--cameras", args.cameras]
         fk_urdf = str(args.fk_urdf).strip()
         if fk_urdf:
             cmd_convert += [

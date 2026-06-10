@@ -60,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conda-env", default="lerobot")
     parser.add_argument(
         "--conda-setup",
-        default="/home/sirlab-pwd-0000/miniconda3/etc/profile.d/conda.sh",
+        default="/home/sirlab/miniconda3/etc/profile.d/conda.sh",
     )
     parser.add_argument("--home-vel-ratio", default="5")
     parser.add_argument("--home-acc-ratio", default="5")
